@@ -3,9 +3,6 @@
 ### A World of Warcraft WotLK 3.3.5a Addon for AzerothCore Private Servers
 
 
-![Class Tab](Class%20Tab.png)
-![Raid Window](Raid%20Window.png)
-
 \---
 
 ## 
