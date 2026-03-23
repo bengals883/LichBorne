@@ -223,6 +223,9 @@ All data is stored in WoW's SavedVariables system under `LichborneTrackerDB` and
 
 ## Credits
 
+Shoutout to **Dohtt** for the feature suggestions that made v1.50 better!
+
+
 Built for the **Lichborne** AzerothCore private server.
 
 Questions & Support: **lichborne.wow@proton.me**
