@@ -1,119 +1,143 @@
 # LICHBORNE — Gear Tracker
+**A World of Warcraft WotLK 3.3.5a Addon for AzerothCore Private Servers**
 
-### A World of Warcraft WotLK 3.3.5a Addon for AzerothCore Private Servers
+**Version 1.60**
 
-**Version 1.51**
+---
 
-\---
-
-## What's New in v1.51
-
-* **Drag after sort fixed** — sorting no longer blocks drag reordering; dragging clears the sort mode so your manual order sticks
-* Dragging characters on tables now take the position and move everyone down (before it would swap positions)
-* **Clear Raids / Clear All Data** swapped positions
-* Fixed overflow of data when copying large raids into smaller raids
-* Various bug fixes and UI polish
-
-\---
 ## Screenshots
 
-**Character Sheet (All Tab)**
 ![Character Sheet](screenshots/Character_Sheet.png)
-
-**Class Tracker**
 ![Class Tracker](screenshots/Class_Tracker.png)
-
-**Raid Planner**
 ![Raid Planner](screenshots/Raid_Planner.png)
+
+---
+
+## What's New in v1.60
+
+- **Needs System** — Mark up to 2 gear slots per character as needed. Visible and editable across Class, All, and Raid tabs. Data persists in SavedVariables
+- **Needs picker popup** — Click any Needs cell to open a slot icon grid. Left-click to mark, right-click to remove. Slots dim when at the 2-slot limit
+- **Needs column in Class tabs** — Displayed beside GS column, shared with All and Raid tabs
+- **All tab delete fixed** — Delete button now correctly removes characters from both the All tab and the class tab database
+- **Raid tab invite fixed** — Invite button now correctly uses `.playerbots bot add` instead of the native WoW invite
+- **Clear All Data** now also clears all Needs data
+- Tier Key and class tabs centered in the frame
+- Title bar and danger buttons no longer overlap
+
+---
 
 ## Features
 
 ### Class Tabs
 
-Each of the 10 playable classes has its own tab with up to **54 roster slots** across **3 pages**. Each character row tracks:
+Each of the 10 playable classes has its own tab with up to 54 roster slots across 3 pages. Each character row tracks:
 
-* **Row number** — muted grey, turns gold on hover
-* **Spec icon** — auto-detected from talent inspection
-* **Name** — editable, colored by class
-* **Gear Score** — calculated from item levels via inspect
-* **17 gear slots** — Head, Neck, Shoulders, Back, Chest, Wrists, Hands, Waist, Legs, Feet, Ring 1, Ring 2, Trinket 1, Trinket 2, Main Hand, Off Hand, Ranged
-* **Tier rating** — color-coded T1 through T17
-* **Add to Raid** (+) and **Invite to Group** (>) buttons per row
+- Row number — muted grey, turns gold on hover
+- Spec icon — auto-detected from talent inspection
+- Name — editable, colored by class
+- Gear Score — calculated from item levels via inspect
+- **Needs** — up to 2 gear slots marked as needed, shown as slot icons
+- 17 gear slots — Head, Neck, Shoulders, Back, Chest, Wrists, Hands, Waist, Legs, Feet, Ring 1, Ring 2, Trinket 1, Trinket 2, Main Hand, Off Hand, Ranged
+- Add to Raid (+) and Invite to Group (>) buttons per row
+- Hover any gear slot to see the full item tooltip
 
-#### Sort \& Page
+### Sort & Page
 
-Every tab has a **Sort** dropdown (top-left) and **Page** dropdown (top-right) on the header bar. Sort options: By Name, By Class/Spec, By Gear Score. After dragging to reorder, sort mode clears so your order sticks.
+Every tab has a Sort dropdown (top-left) and Page dropdown (top-right). Sort options: By Name, By Class/Spec, By Gear Score. After dragging to reorder, sort mode clears so your order sticks.
 
-#### Bottom Controls (Class Tabs)
+### Bottom Controls (Class Tabs)
 
-* **+ Add Target** — Inspects your current target and adds them
-* **+ Add Group** — Bulk-adds all group/raid members
-* **+ Add Target/Group GS** — Refreshes gear score (does not affect spec)
-* **+ Add Target/Group Spec** — Reads talent spec (does not affect GS)
-* **Stop** — Cancels a running GS or Spec scan
-* **Maintenance** — Sends `maintenance` to group chat
-* **AutoGear** — Sends `autogear` to group chat
-* **Login/Logout All Bots** — `.playerbots bot add/remove \\\*`
-* **Disband Group / Raid** — Kicks all members then leaves. Requires confirmation.
-* **Invite Raid / Stop Invite** — Visible on all tabs
+- **+ Add Target** — Inspects your current target and adds them
+- **+ Add Group** — Bulk-adds all group/raid members
+- **+ Add Target/Group GS** — Refreshes gear score (does not affect spec)
+- **+ Add Target/Group Spec** — Reads talent spec (does not affect GS)
+- **Stop** — Cancels a running GS or Spec scan
+- **Maintenance** — Sends maintenance to group chat
+- **AutoGear** — Sends autogear to group chat
+- **Login/Logout All Bots** — `.playerbots bot add/remove *`
+- **Disband Group / Raid** — Kicks all members then leaves. Requires confirmation
+- **Invite Raid / Stop Invite** — Visible on all tabs
 
-#### Summary Bars
+### Summary Bars
 
-* **Avg bar** — average tier per class, dark background, class name in class color, tier value in gold (T3, T10...)
-* **Count bar** — total characters per class, class name in class color, number in class color
+- **Avg bar** — average gear score per class, class name in class color, value in gold
+- **Count bar** — total characters per class
 
-\---
+---
 
-### Raid Tab
+## Needs System
 
-Up to **40 slots** across two columns. Each slot shows class icon, spec icon, name, GS, tier, role, notes, delete button.
+Per-character gear slot wishlist, accessible from all tabs.
 
-#### Raid Controls
+- 15 selectable slots: Head, Neck, Shoulders, Back, Chest, Wrists, Hands, Waist, Legs, Feet, Ring, Trinket, Main Hand, Off Hand, Ranged
+- Max 2 needs per character
+- Click a Needs cell to open the picker popup
+- Left-click a slot icon to mark as needed, right-click to remove
+- Once at max (2), remaining slots are dimmed
+- Right-click the Needs cell itself to clear all needs for that character
+- Changes sync instantly across Class, All, and Raid tabs
+- Stored in `LichborneTrackerDB.needs` per character name
 
-* **Sort** — By Name, Class/Spec, or Gear Score
-* **Tier / Raid / Group dropdowns** — Tier color matches raid name color
-* **Copy** — Copies current roster to session clipboard
-* **Paste** — Prompts confirmation, pastes into destination, disappears after one use
-* **Clear** — Clears roster with confirmation
+---
 
-#### Copy / Paste
+## Raid Tab
+
+Up to 40 slots across two columns. Each slot shows class icon, spec icon, name, GS, needs, role, notes, and delete button.
+
+### Raid Controls
+
+- **Sort** — By Name, Class/Spec, or Gear Score
+- **Tier / Raid / Group dropdowns** — Tier color matches raid name color
+- **Copy** — Copies current roster to session clipboard
+- **Paste** — Prompts confirmation, pastes into destination, disappears after one use
+- **Clear** — Clears roster with confirmation
+
+### Copy / Paste
 
 1. Navigate to source roster → click **Copy**
 2. Navigate to destination → click **Paste**
 3. Confirm: *"Copy T1 Molten Core (A) roster to T3 Karazhan (B)?"*
-4. Status bar shows **"Roster copied!"**
+4. Status bar shows "Roster copied!"
 
 Clipboard is session-only. Paste respects destination raid size — a 10-man paste from a 40-man only fills 10 slots.
 
-#### Invite Raid
+### Invite Raid
 
-Automatically logs out old bots, leaves party, converts to raid, invites all members with verification and retry.
+Automatically logs out old bots, leaves party, converts to raid, and invites all roster members via `.playerbots bot add`.
 
-\---
+---
 
-### Character Sheet Tab
+## Character Sheet (All Tab)
 
 Master view of all tracked characters across all classes — 3 columns of 20 rows (60 per page, 180 total).
 
-* Sort by Name, Class/Spec, or Gear Score
-* Count bar shows totals across all pages
+- Groups A, B, C for organizing characters
+- Sort by Name, Class/Spec, or Gear Score
+- Needs column editable per row
+- Add to Raid and Invite to Group buttons per row
+- Delete characters directly
+- Count bar shows totals across all pages
 
-\---
+---
+
+## Tier Key
+
+Color-coded T1–T17 reference bar at the top of the frame. Hover any swatch to see the full tier name and associated raids.
+
+---
 
 ## Installation
 
 1. Download the zip and extract it
-2. Drag the **`LichborneTracker`** folder into:
-
-```
-World of Warcraft/Interface/AddOns/
-```
-
+2. Drag the `LichborneTracker` folder into:
+   ```
+   World of Warcraft/Interface/AddOns/
+   ```
 3. Launch WoW and type `/lichborne` or click the minimap icon
 
 **Requirements:** WoW 3.3.5a (WotLK) | AzerothCore | Playerbot module
 
-\---
+---
 
 ## How To Use
 
@@ -125,15 +149,21 @@ World of Warcraft/Interface/AddOns/
 
 ### Tracking Gear
 
-* **+ Add Target/Group GS** — updates gear score without touching spec
-* Gear slot boxes — enter the tier number of each drop manually (e.g. MC drop = 1)
+- **+ Add Target/Group GS** — updates gear score without touching spec
+- Hover any gear slot to see the full item tooltip
 
 ### Building a Raid Roster
 
-1. Switch to **Raid tab** → select tier and raid
+1. Switch to **Raid** tab → select tier and raid
 2. Use **+** on any character row to add them
 3. Assign roles and notes
 4. Click **Invite Raid**
+
+### Marking Needs
+
+1. Click any **Needs** cell on the Class, All, or Raid tab
+2. Select up to 2 slot icons from the picker
+3. Right-click a slot to remove it, or right-click the cell to clear all
 
 ### Copying a Roster
 
@@ -142,37 +172,55 @@ World of Warcraft/Interface/AddOns/
 
 ### Disbanding
 
-**Disband Group / Raid** (bottom-left) kicks every member via `.playerbots bot remove` + `UninviteUnit`, waits 1 second, then calls `LeaveParty()`.
+**Disband Group / Raid** kicks every member via `.playerbots bot remove`, waits, then calls `LeaveParty()`. Requires confirmation.
 
-\---
+---
 
-## Data \& Saved Variables
+## Data & Saved Variables
 
-Stored under `LichborneTrackerDB` and `LichborneMinimapIconDB` per WoW account. **Clear All Data** permanently deletes all tracked characters, gear, and rosters.
+Stored under `LichborneTrackerDB` and `LichborneMinimapIconDB` per WoW account.
 
-Data is saved per account — to share between accounts, copy:
+| Key | Contents |
+|---|---|
+| `rows` | All tracked characters and gear data |
+| `allGroups` | All tab group assignments (A/B/C) |
+| `raidRosters` | Raid rosters keyed by raid name + group |
+| `needs` | Gear needs per character |
+| `raidName` | Currently selected raid |
+| `raidTier` | Currently selected tier |
+| `raidGroup` | Currently selected group (A/B/C) |
 
+**Clear All Data** permanently deletes all tracked characters, gear, rosters, and needs data.
+
+To share data between accounts, copy:
 ```
 WoW/WTF/Account/ACCOUNTNAME/SavedVariables/LichborneTracker.lua
 ```
 
-\---
+---
 
 ## Known Limitations
 
-* Inspect requires target within \~28 yards
-* `NotifyInspect()` is rate-limited — bulk scans space out automatically
-* Playerbot commands sent via SAY chat — requires bot ownership
-* Roster clipboard is session-only (lost on `/reload`)
+- Inspect requires target within ~28 yards
+- `NotifyInspect()` is rate-limited — bulk scans space out automatically
+- Playerbot commands sent via SAY chat — requires bot ownership
+- Roster clipboard is session-only (lost on `/reload`)
 
-\---
+---
+
+## Slash Commands
+
+| Command | Action |
+|---|---|
+| `/lichborne` | Toggle the tracker window |
+| `/lbt` | Toggle the tracker window (short alias) |
+
+---
 
 ## Credits
 
-Built for the **Lichborne** AzerothCore private server.
-Special thanks to **Dohtt** for feature suggestions.
+Built for the Lichborne AzerothCore private server. Special thanks to Dohtt for feature suggestions.
 
-Questions \& Support: **lichborne.wow@proton.me**
+**Questions & Support:** lichborne.wow@proton.me
 
 *Compatible with WoW 3.3.5a (build 12340) | AzerothCore | Playerbot Module*
-
