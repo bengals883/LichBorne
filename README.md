@@ -2,7 +2,7 @@
 
 **A World of Warcraft WotLK 3.3.5a Addon for AzerothCore Private Servers**
 
-**Version 1.72**
+**Version 1.73**
 
 ---
 
@@ -16,6 +16,8 @@
 
 ## Recent Changes
 
+- **Minimap icon updated** — The minimap button now uses a book texture for a cleaner look.
+- **Minimap icon fix** — Fixed an issue where the minimap icon would not appear on fresh installs without other broker addons present. Bundled libs have been replaced with compatible versions and registration now happens at the correct load stage.
 - **T0 raid dropdown crash fix** — Fixed a nil error when opening the raid dropdown while Tier 0 (5-Man) was selected.
 - **Add Group scan compatibility fix** — Group scan buttons now bind the local scan-state helper correctly on 3.3.5a, preventing `SetScanActive` nil errors reported through addon hook stacks such as BugSack or ElvUI.
 - **Addon load compatibility fix** — Bundled `CallbackHandler-1.0` is now loaded before `LibDataBroker-1.1`, and startup no longer hard-fails if the minimap broker stack is unavailable.
@@ -31,7 +33,7 @@
 - **Deletion cleanup** — Removing a character also clears matching needs and raid roster references.
 - **Invite flow fixes** — Invite buttons now reflect whether you are inviting a raid, inviting a group, or have an active invite run.
 - **Raid size normalization** — Raid rosters now initialize and clamp correctly for the selected size.
-- **Needs system** — Up to 2 needed gear slots per character, editable across Class, All, and Raid tabs.
+- **Need Box** — Up to 2 needed gear slots per character, editable across Class, All, and Raid tabs.
 
 ---
 
@@ -46,14 +48,10 @@ Each of the 10 playable classes has its own tab with up to 54 roster slots acros
 - Name — editable, colored by class
 - iLvl — average equipped item level calculated via inspect
 - Gear Score — actual WotLK-style GearScore calculated from inspected gear, colored by item quality
-- **Needs** — up to 2 gear slots marked as needed, shown as slot icons
+- **Need Box** — up to 2 gear slots marked as needed, shown as slot icons
 - 17 gear slots — Head, Neck, Shoulders, Back, Chest, Wrists, Hands, Waist, Legs, Feet, Ring 1, Ring 2, Trinket 1, Trinket 2, Main Hand, Off Hand, Ranged
 - Add to Raid (+) and Invite to Group (>) buttons per row
 - Hover any gear slot to see the full item tooltip
-
-### Sort & Page
-
-Every tab has a Sort dropdown (top-left) and Page dropdown (top-right). Sort options: By Name, By Class/Spec, By Gear Score. Gear Score sorting uses the true GS column. After dragging to reorder, sort mode clears so your order sticks.
 
 ### Bottom Controls (Class Tabs)
 
@@ -70,22 +68,22 @@ Every tab has a Sort dropdown (top-left) and Page dropdown (top-right). Sort opt
 
 ### Summary Bars
 
-- **Avg bar** — average tracked item level per class, class name in class color, value in gold
+- **Avg bar** — average tracked item level per class
 - **GS bar** — average GearScore per class
 - **Count bar** — total characters per class
 
 ---
 
-## Needs System
+## Need Box
 
 Per-character gear slot wishlist, accessible from all tabs.
 
 - 15 selectable slots: Head, Neck, Shoulders, Back, Chest, Wrists, Hands, Waist, Legs, Feet, Ring, Trinket, Main Hand, Off Hand, Ranged
 - Max 2 needs per character
-- Click a Needs cell to open the picker popup
+- Click a Need Box cell to open the picker popup
 - Left-click a slot icon to mark as needed, right-click to remove
 - Once at max (2), remaining slots are dimmed
-- Right-click the Needs cell itself to clear all needs for that character
+- Right-click the Need Box cell itself to clear all needs for that character
 - Changes sync instantly across Class, All, and Raid tabs
 - Stored in LichborneTrackerDB.needs per character name
 
@@ -98,7 +96,7 @@ Up to 40 slots across two columns. Each slot shows class icon, spec icon, name, 
 ### Raid Controls
 
 - **Sort** — By Name, Class/Spec, or Gear Score using the real GS value
-- **Tier / Raid / Group dropdowns** — Tier color matches raid name color
+- **Tier / Raid / Group dropdowns** — Tier color matches the progression tiers from the Individual Progression module for AzerothCore
 - **Copy** — Copies current roster to session clipboard
 - **Paste** — Prompts confirmation, pastes into destination, disappears after one use
 - **Clear** — Clears roster with confirmation
@@ -124,7 +122,7 @@ Master view of all tracked characters across all classes — 3 columns of 20 row
 
 - Groups A, B, C for organizing characters
 - Sort by Name, Class/Spec, or Gear Score using the real GS value
-- Needs column editable per row
+- Need Box column editable per row
 - Add to Raid and Invite to Group buttons per row
 - Delete characters directly
 - Count bar shows totals across all pages
@@ -133,7 +131,7 @@ Master view of all tracked characters across all classes — 3 columns of 20 row
 
 ## Tier Key
 
-Color-coded T1-T17 reference bar at the top of the frame. Hover any swatch to see the full tier name and associated raids.
+Color-coded tier reference bar at the top of the frame, aligned with the Individual Progression module for AzerothCore. Hover any swatch to see the full tier name and associated raids.
 
 ---
 
@@ -145,16 +143,16 @@ Navigate to your AddOns folder and run:
 
     git clone https://github.com/Lichborne-AC/LichBorne-Gear-Tracker.git LichborneTracker
 
-To update later just run git pull inside the LichborneTracker folder.
+To update later just run `git pull` inside the LichborneTracker folder.
 
 ### Option 2 — Manual Install
 
-1. Download LichborneTracker_v171.zip from the Releases page
+1. Download the latest zip from the Releases page
 2. Extract and drag the LichborneTracker folder into:
 
     World of Warcraft/Interface/AddOns/
 
-3. Launch WoW and type /lichborne or click the minimap icon
+3. Launch WoW and type `/lichborne` or click the minimap book icon
 
 **Requirements:** WoW 3.3.5a (WotLK) | AzerothCore | Playerbot module
 
@@ -164,7 +162,7 @@ To update later just run git pull inside the LichborneTracker folder.
 
 ### First Time Setup
 
-1. Open the tracker with /lichborne
+1. Open the tracker with `/lichborne` or click the minimap book icon
 2. Target a character and click + Add Target
 3. Or get everyone at once: group up and click + Add Group
 
@@ -183,7 +181,7 @@ To update later just run git pull inside the LichborneTracker folder.
 
 ### Marking Needs
 
-1. Click any Needs cell on the Class, All, or Raid tab
+1. Click any Need Box cell on the Class, All, or Raid tab
 2. Select up to 2 slot icons from the picker
 3. Right-click a slot to remove it, or right-click the cell to clear all
 
@@ -239,7 +237,7 @@ Stored under LichborneTrackerDB and LichborneMinimapIconDB per WoW account.
 
 Built for the Lichborne AzerothCore private server.
 
-Special thanks to: **Dohtt**, **Scarecr0w12** — TheCGN.net, **Dreathean**, **Revision**, and **crow** for feature suggestions and support.
+Special thanks to: **Dohtt**, **Scarecr0w12** — TheCGN.net, **Dreathean**, **Revision**, **crow**, and **ScoobyPwnsOnU** for feature suggestions, testing, and support.
 
 **Questions & Support:** lichborne.wow@proton.me
 
