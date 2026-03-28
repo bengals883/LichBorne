@@ -16,23 +16,13 @@
 
 ## Recent Changes
 
-- **Minimap icon fix (improved)** — Added a native fallback minimap button based on DBM's implementation that activates automatically when LibDBIcon is unavailable, guaranteeing the icon appears on every machine regardless of lib compatibility. Bundled libs updated to DBM-compatible versions.
-- **Minimap icon updated** — The minimap button now uses a book texture for a cleaner look.
-- **T0 raid dropdown crash fix** — Fixed a nil error when opening the raid dropdown while Tier 0 (5-Man) was selected.
-- **Add Group scan compatibility fix** — Group scan buttons now bind the local scan-state helper correctly on 3.3.5a, preventing `SetScanActive` nil errors reported through addon hook stacks such as BugSack or ElvUI.
-- **Addon load compatibility fix** — Bundled `CallbackHandler-1.0` is now loaded before `LibDataBroker-1.1`, and startup no longer hard-fails if the minimap broker stack is unavailable.
-- **3.3.5a-safe UI handlers** — Replaced fragile implicit handler globals like `this` and `arg1` with explicit script arguments to reduce conflicts with other addons.
-- **Gear Score average bar in Class tabs** — Each class tab now displays an average GearScore bar alongside the existing average iLvl bar.
+- **Minimap icon fix (improved)** —  Fixed display issue and updated to a book texture for a cleaner look
+- **Gear Score average bar in Class tabs** Each class tab now displays an average GearScore bar alongside the existing average iLvl bar.
 - **Item quality colors on gear slots** — Gear slot icons in the class tab are now color-coded to match WoW item quality (grey, white, green, blue, purple, orange).
 - **Buttons disabled during scans** — Get Gear Score, Get Group Spec, and Invite Raid buttons are now disabled while a scan or invite sequence is running to prevent conflicts.
-- **Visual updates and fixes** — General polish and layout corrections across tabs.
 - **Separate iLvl and GS columns** — The old GS field is now labeled iLvl, and a new GS column tracks actual GearScore.
-- **Actual GearScore calculation** — Inspect now calculates WotLK-style GearScore from equipped gear instead of reusing average item level.
-- **Shared score syncing** — iLvl and GS stay in sync across Class, All, and Raid tabs, including copy/paste and drag reorder paths.
-- **All tab action fixes** — Delete, add-to-group, and add-to-raid actions now operate on the visible character.
-- **Deletion cleanup** — Removing a character also clears matching needs and raid roster references.
+- **Actual GearScore calculation** — Inspect now calculates WotLK-style GearScore from equipped gear instead of reusing average item levels.
 - **Invite flow fixes** — Invite buttons now reflect whether you are inviting a raid, inviting a group, or have an active invite run.
-- **Raid size normalization** — Raid rosters now initialize and clamp correctly for the selected size.
 - **Need Box** — Up to 2 needed gear slots per character, editable across Class, All, and Raid tabs.
 
 ---
