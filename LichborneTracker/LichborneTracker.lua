@@ -1,0 +1,5465 @@
+-- ============================================================
+--  LichborneTracker.lua  |  WotLK 3.3.5a  |  AzerothCore
+-- ============================================================
+
+if not LichborneTrackerDB then LichborneTrackerDB = {} end
+if not LichborneTrackerDB.rows then LichborneTrackerDB.rows = {} end
+if not LichborneTrackerDB.notes then LichborneTrackerDB.notes = "" end
+if not LichborneTrackerDB.raid then LichborneTrackerDB.raid = "" end
+if not LichborneTrackerDB.raidRows then LichborneTrackerDB.raidRows = {} end  -- legacy compat
+if not LichborneTrackerDB.raidRosters then LichborneTrackerDB.raidRosters = {} end
+if not LichborneTrackerDB.raidTier then LichborneTrackerDB.raidTier = 0 end
+if not LichborneTrackerDB.needs then LichborneTrackerDB.needs = {} end  -- keyed by charname:lower()
+if not LichborneTrackerDB.raidName then LichborneTrackerDB.raidName = "Molten Core" end
+if not LichborneTrackerDB.raidSize then LichborneTrackerDB.raidSize = 40 end
+if not LichborneTrackerDB.raidGroup then LichborneTrackerDB.raidGroup = "A" end
+if not LichborneTrackerDB.allGroups then
+    LichborneTrackerDB.allGroups = {}
+    for _, g in ipairs({"A","B","C"}) do
+        LichborneTrackerDB.allGroups[g] = {}
+        for i = 1, 60 do LichborneTrackerDB.allGroups[g][i] = {name="",cls="",spec="",gs=0,realGs=0} end
+    end
+end
+if not LichborneTrackerDB.allGroup then LichborneTrackerDB.allGroup = "A" end
+local MAX_RAID_SLOTS = 40
+-- Legacy migration
+if LichborneTrackerDB.allRows then
+    if not LichborneTrackerDB.allGroups then LichborneTrackerDB.allGroups = {A={},B={},C={}} end
+    for i,v in ipairs(LichborneTrackerDB.allRows) do
+        if v.realGs == nil then v.realGs = 0 end
+        LichborneTrackerDB.allGroups["A"][i] = v
+    end
+    LichborneTrackerDB.allRows = nil
+end
+
+
+-- Returns the roster table for the currently selected raid, creating if needed
+local function GetCurrentRoster()
+    -- Guard: ensure DB and raidRosters exist (may not yet if SavedVars not loaded)
+    if not LichborneTrackerDB then LichborneTrackerDB = {} end
+    if not LichborneTrackerDB.raidRosters then LichborneTrackerDB.raidRosters = {} end
+    if not LichborneTrackerDB.raidName then LichborneTrackerDB.raidName = "N/A (5-Man)" end
+    if not LichborneTrackerDB.raidSize then LichborneTrackerDB.raidSize = 5 end
+    if not LichborneTrackerDB.raidGroup then LichborneTrackerDB.raidGroup = "A" end
+    if not LichborneTrackerDB.allGroups then
+        LichborneTrackerDB.allGroups = {}
+        for _, g in ipairs({"A","B","C"}) do
+            LichborneTrackerDB.allGroups[g] = {}
+            for i = 1, 60 do
+                LichborneTrackerDB.allGroups[g][i] = {name="",cls="",spec="",gs=0,realGs=0}
+            end
+        end
+    end
+    if not LichborneTrackerDB.allGroup then LichborneTrackerDB.allGroup = "A" end
+    local name = LichborneTrackerDB.raidName
+    local size = LichborneTrackerDB.raidSize
+    if type(size) ~= "number" then size = tonumber(size) or 5 end
+    if size < 1 then size = 1 end
+    if size > MAX_RAID_SLOTS then size = MAX_RAID_SLOTS end
+    LichborneTrackerDB.raidSize = size
+    local group = LichborneTrackerDB.raidGroup
+    local key = name .. "_" .. group   -- e.g. "Karazhan_A"
+    if not LichborneTrackerDB.raidRosters[key] then
+        LichborneTrackerDB.raidRosters[key] = {}
+        for i = 1, MAX_RAID_SLOTS do
+            LichborneTrackerDB.raidRosters[key][i] = {name="", cls="", spec="", gs=0, realGs=0, role="", notes=""}
+        end
+    end
+    local roster = LichborneTrackerDB.raidRosters[key]
+    for i = 1, MAX_RAID_SLOTS do
+        if not roster[i] then roster[i] = {name="", cls="", spec="", gs=0, realGs=0, role="", notes=""} end
+    end
+    return roster, size
+end
+
+local ROW_HEIGHT  = 24
+local GEAR_SLOTS  = 17
+local MAX_ROWS    = 18  -- visible rows per class tab
+local ROWS_PER_PAGE = 18
+local MAX_PAGES   = 3
+local SLOT_ABBR   = {"Head","Neck","Shldr","Back","Chest","Wrist","Hands","Waist","Legs","Feet","Ring1","Ring2","Trnk1","Trnk2","MH","OH","Rngd"}
+
+local GS_SCALE = 1.8618
+local GS_ITEM_TYPES = {
+    ["INVTYPE_RELIC"] = { slotMod = 0.3164 },
+    ["INVTYPE_TRINKET"] = { slotMod = 0.5625 },
+    ["INVTYPE_2HWEAPON"] = { slotMod = 2.0000 },
+    ["INVTYPE_WEAPONMAINHAND"] = { slotMod = 1.0000 },
+    ["INVTYPE_WEAPONOFFHAND"] = { slotMod = 1.0000 },
+    ["INVTYPE_RANGED"] = { slotMod = 0.3164 },
+    ["INVTYPE_THROWN"] = { slotMod = 0.3164 },
+    ["INVTYPE_RANGEDRIGHT"] = { slotMod = 0.3164 },
+    ["INVTYPE_SHIELD"] = { slotMod = 1.0000 },
+    ["INVTYPE_WEAPON"] = { slotMod = 1.0000 },
+    ["INVTYPE_HOLDABLE"] = { slotMod = 1.0000 },
+    ["INVTYPE_HEAD"] = { slotMod = 1.0000 },
+    ["INVTYPE_NECK"] = { slotMod = 0.5625 },
+    ["INVTYPE_SHOULDER"] = { slotMod = 0.7500 },
+    ["INVTYPE_CHEST"] = { slotMod = 1.0000 },
+    ["INVTYPE_ROBE"] = { slotMod = 1.0000 },
+    ["INVTYPE_WAIST"] = { slotMod = 0.7500 },
+    ["INVTYPE_LEGS"] = { slotMod = 1.0000 },
+    ["INVTYPE_FEET"] = { slotMod = 0.7500 },
+    ["INVTYPE_WRIST"] = { slotMod = 0.5625 },
+    ["INVTYPE_HAND"] = { slotMod = 0.7500 },
+    ["INVTYPE_FINGER"] = { slotMod = 0.5625 },
+    ["INVTYPE_CLOAK"] = { slotMod = 0.5625 },
+    ["INVTYPE_BODY"] = { slotMod = 0.0000 },
+}
+
+local GS_FORMULA = {
+    A = {
+        [4] = { A = 91.4500, B = 0.6500 },
+        [3] = { A = 81.3750, B = 0.8125 },
+        [2] = { A = 73.0000, B = 1.0000 },
+    },
+    B = {
+        [4] = { A = 26.0000, B = 1.2000 },
+        [3] = { A = 0.7500, B = 1.8000 },
+        [2] = { A = 8.0000, B = 2.0000 },
+        [1] = { A = 0.0000, B = 2.2500 },
+    },
+}
+
+local function CalculateGearScoreForItemLink(itemLink)
+    if not itemLink then return 0, 0, nil end
+
+    local _, _, itemRarity, itemLevel, _, _, _, _, itemEquipLoc = GetItemInfo(itemLink)
+    local itemType = itemEquipLoc and GS_ITEM_TYPES[itemEquipLoc]
+    if not itemType or not itemRarity or not itemLevel then return 0, itemLevel or 0, itemEquipLoc end
+
+    local qualityScale = 1
+    if itemRarity == 5 then
+        qualityScale = 1.3
+        itemRarity = 4
+    elseif itemRarity == 1 or itemRarity == 0 then
+        qualityScale = 0.005
+        itemRarity = 2
+    end
+
+    if itemRarity == 7 then
+        itemRarity = 3
+        itemLevel = 187.05
+    end
+
+    if itemRarity < 2 or itemRarity > 4 then return 0, itemLevel, itemEquipLoc end
+
+    local formulaSet = itemLevel > 120 and GS_FORMULA.A or GS_FORMULA.B
+    local formula = formulaSet[itemRarity]
+    if not formula then return 0, itemLevel, itemEquipLoc end
+
+    local score = ((itemLevel - formula.A) / formula.B) * itemType.slotMod * GS_SCALE * qualityScale
+    if score < 0 then score = 0 end
+
+    return math.floor(score), itemLevel, itemEquipLoc
+end
+
+local function CalculateUnitGearScore(unitToken)
+    if not unitToken or not UnitExists(unitToken) then return 0 end
+
+    local _, classToken = UnitClass(unitToken)
+    local titanGripScale = 1
+    local mainHandLink = GetInventoryItemLink(unitToken, 16)
+    local offHandLink = GetInventoryItemLink(unitToken, 17)
+
+    if mainHandLink and offHandLink then
+        local _, _, _, _, _, _, _, _, mainEquipLoc = GetItemInfo(mainHandLink)
+        local _, _, _, _, _, _, _, _, offEquipLoc = GetItemInfo(offHandLink)
+        if mainEquipLoc == "INVTYPE_2HWEAPON" or offEquipLoc == "INVTYPE_2HWEAPON" then
+            titanGripScale = 0.5
+        end
+    end
+
+    local totalScore = 0
+
+    if offHandLink then
+        local offHandScore = select(1, CalculateGearScoreForItemLink(offHandLink))
+        if classToken == "HUNTER" then offHandScore = offHandScore * 0.3164 end
+        totalScore = totalScore + (offHandScore * titanGripScale)
+    end
+
+    for slot = 1, 18 do
+        if slot ~= 4 and slot ~= 17 then
+            local itemLink = GetInventoryItemLink(unitToken, slot)
+            if itemLink then
+                local itemScore = select(1, CalculateGearScoreForItemLink(itemLink))
+                if classToken == "HUNTER" then
+                    if slot == 16 then
+                        itemScore = itemScore * 0.3164
+                    elseif slot == 18 then
+                        itemScore = itemScore * 5.3224
+                    end
+                end
+                if slot == 16 then itemScore = itemScore * titanGripScale end
+                totalScore = totalScore + itemScore
+            end
+        end
+    end
+
+    if totalScore <= 0 then return 0 end
+    return math.floor(totalScore)
+end
+
+-- ── Needs system ───────────────────────────────────────────────
+local NEEDS_SLOTS = {
+    { key="head",    icon="Interface\\Icons\\INV_Helmet_03",              label="Head"      },
+    { key="neck",    icon="Interface\\Icons\\INV_Jewelry_Necklace_07",    label="Neck"      },
+    { key="shoulder",icon="Interface\\Icons\\INV_Shoulder_22",            label="Shoulders" },
+    { key="back",    icon="Interface\\Icons\\INV_Misc_Cape_07",           label="Back"      },
+    { key="chest",   icon="Interface\\Icons\\INV_Chest_Cloth_04",         label="Chest"     },
+    { key="wrist",   icon="Interface\\Icons\\INV_Bracer_07",              label="Wrists"    },
+    { key="hands",   icon="Interface\\Icons\\INV_Gauntlets_04",           label="Hands"     },
+    { key="waist",   icon="Interface\\Icons\\INV_Belt_13",                label="Waist"     },
+    { key="legs",    icon="Interface\\Icons\\INV_Pants_06",               label="Legs"      },
+    { key="feet",    icon="Interface\\Icons\\INV_Boots_05",               label="Feet"      },
+    { key="ring",    icon="Interface\\Icons\\INV_Jewelry_Ring_02",        label="Ring"      },
+    { key="trinket", icon="Interface\\Icons\\INV_Misc_Rune_06",                label="Trinket"    },
+    { key="mh",      icon="Interface\\Icons\\INV_Sword_27",               label="Main Hand" },
+    { key="oh",      icon="Interface\\Icons\\INV_Shield_06",              label="Off Hand"  },
+    { key="ranged",  icon="Interface\\Icons\\INV_Weapon_Bow_07",          label="Ranged"    },
+}
+local NEEDS_ICON_SIZE = 18  -- size of each mini icon in the needs cell
+
+local function GetNeeds(charName)
+    if not charName or charName == "" then return {} end
+    local k = charName:lower()
+    if not LichborneTrackerDB.needs then LichborneTrackerDB.needs = {} end
+    if not LichborneTrackerDB.needs[k] then LichborneTrackerDB.needs[k] = {} end
+    return LichborneTrackerDB.needs[k]
+end
+
+local MAX_NEEDS = 2  -- max stored + displayed needs per character
+
+local function SetNeed(charName, slotKey, val)
+    if not charName or charName == "" then return end
+    if not LichborneTrackerDB.needs then LichborneTrackerDB.needs = {} end
+    local k = charName:lower()
+    if not LichborneTrackerDB.needs[k] then LichborneTrackerDB.needs[k] = {} end
+    if val then
+        -- count current needs
+        local count = 0
+        for _ in pairs(LichborneTrackerDB.needs[k]) do count = count + 1 end
+        if count < MAX_NEEDS then
+            LichborneTrackerDB.needs[k][slotKey] = true
+        end
+    else
+        LichborneTrackerDB.needs[k][slotKey] = nil
+    end
+end
+
+local function HasNeeds(charName)
+    if not charName or charName == "" then return false end
+    if not LichborneTrackerDB.needs then return false end
+    local n = LichborneTrackerDB.needs[charName:lower()]
+    if not n then return false end
+    for _ in pairs(n) do return true end
+    return false
+end
+
+-- Shared singleton needs picker popup
+local needsPicker = nil
+local needsPickerOwner = nil  -- charName currently open
+
+local COL_NAME_W  = 140
+local COL_GS_W    = 42
+local COL_GEAR_W  = 44
+local COL_NEEDS_W = 42  -- needs cell: fits exactly 2 icons (2 + 18 + 2 + 18 + 2)
+local NAME_OFF    = 4
+local GS_OFF      = NAME_OFF + COL_NAME_W + 6
+local REALGS_OFF  = GS_OFF + COL_GS_W + 2
+local NEEDS_OFF   = REALGS_OFF + COL_GS_W + 2    -- needs cell right after GS
+local GEAR_OFF    = NEEDS_OFF + COL_NEEDS_W + 2  -- gear slots shifted right
+
+local COL_DRAG_W  = 18  -- drag handle width
+local COL_SPEC_W  = 24  -- icon column width
+local DRAG_OFF    = 0   -- drag handle at far left
+local SPEC_OFF    = COL_DRAG_W + 2  -- spec icon after drag handle
+-- shift name right to make room for drag + spec
+NAME_OFF = NAME_OFF + COL_DRAG_W + 2 + COL_SPEC_W + 2
+
+-- Spec → icon mapping (WotLK interface icons)
+local SPEC_ICONS = {
+    -- Death Knight
+    ["Blood"]       = "Interface\\Icons\\Spell_DeathKnight_BloodPresence",
+    ["Frost DK"]    = "Interface\\Icons\\Spell_DeathKnight_FrostPresence",
+    ["Unholy"]      = "Interface\\Icons\\Spell_DeathKnight_UnholyPresence",
+    -- Druid
+    ["Balance"]     = "Interface\\Icons\\Spell_Nature_StarFall",
+    ["Feral"]       = "Interface\\Icons\\Ability_Druid_CatForm",
+    ["Restoration"] = "Interface\\Icons\\Spell_Nature_HealingTouch",
+    -- Hunter
+    ["Beast Mastery"] = "Interface\\Icons\\Ability_Hunter_BeastTaming",
+    ["Marksmanship"]  = "Interface\\Icons\\Ability_Marksmanship",
+    ["Survival"]      = "Interface\\Icons\\Ability_Hunter_SwiftStrike",
+    -- Mage
+    ["Arcane"]      = "Interface\\Icons\\Spell_Holy_MagicalSentry",
+    ["Fire"]        = "Interface\\Icons\\Spell_Fire_FireBolt02",
+    ["Frost"]       = "Interface\\Icons\\Spell_Frost_FrostBolt02",
+    -- Paladin
+    ["Holy Pala"]   = "Interface\\Icons\\Spell_Holy_HolyBolt",
+    ["Protection"]  = "Interface\\Icons\\Ability_Paladin_ShieldoftheTemplar",
+    ["Retribution"] = "Interface\\Icons\\Spell_Holy_AuraofLight",
+    -- Priest
+    ["Discipline"]  = "Interface\\Icons\\Spell_Holy_WordFortitude",
+    ["Holy Priest"] = "Interface\\Icons\\Spell_Holy_GuardianSpirit",
+    ["Shadow"]      = "Interface\\Icons\\Spell_Shadow_ShadowWordPain",
+    -- Rogue
+    ["Assassination"] = "Interface\\Icons\\Ability_Rogue_Eviscerate",
+    ["Combat"]        = "Interface\\Icons\\Ability_BackStab",
+    ["Subtlety"]      = "Interface\\Icons\\Ability_Stealth",
+    -- Shaman
+    ["Elemental"]   = "Interface\\Icons\\Spell_Nature_Lightning",
+    ["Enhancement"] = "Interface\\Icons\\Spell_Nature_LightningShield",
+    ["Restoration Shaman"] = "Interface\\Icons\\Spell_Nature_MagicImmunity",
+    -- Warlock
+    ["Affliction"]  = "Interface\\Icons\\Spell_Shadow_DeathCoil",
+    ["Demonology"]  = "Interface\\Icons\\Spell_Shadow_Metamorphosis",
+    ["Destruction"] = "Interface\\Icons\\Spell_Shadow_RainOfFire",
+    -- Warrior
+    ["Arms"]        = "Interface\\Icons\\Ability_Warrior_Sunder",
+    ["Fury"]        = "Interface\\Icons\\Ability_Warrior_InnerRage",
+    ["Protection Warrior"] = "Interface\\Icons\\Ability_Warrior_DefensiveStance",
+}
+
+-- Tab index → spec names in talent tree order (tab1, tab2, tab3)
+local CLASS_SPECS = {
+    ["Death Knight"] = {"Blood", "Frost DK", "Unholy"},
+    ["Druid"]        = {"Balance", "Feral", "Restoration"},
+    ["Hunter"]       = {"Beast Mastery", "Marksmanship", "Survival"},
+    ["Mage"]         = {"Arcane", "Fire", "Frost"},
+    ["Paladin"]      = {"Holy Pala", "Protection", "Retribution"},
+    ["Priest"]       = {"Discipline", "Holy Priest", "Shadow"},
+    ["Rogue"]        = {"Assassination", "Combat", "Subtlety"},
+    ["Shaman"]       = {"Elemental", "Enhancement", "Restoration Shaman"},
+    ["Warlock"]      = {"Affliction", "Demonology", "Destruction"},
+    ["Warrior"]      = {"Arms", "Fury", "Protection Warrior"},
+}
+
+local CLASS_COLORS = {
+    ["Death Knight"]={r=0.77,g=0.12,b=0.23}, ["Druid"]={r=1.00,g=0.49,b=0.04},
+    ["Hunter"]={r=0.67,g=0.83,b=0.45},       ["Mage"]={r=0.25,g=0.78,b=0.92},
+    ["Paladin"]={r=0.96,g=0.55,b=0.73},      ["Priest"]={r=1.00,g=1.00,b=1.00},
+    ["Rogue"]={r=1.00,g=0.96,b=0.41},        ["Shaman"]={r=0.00,g=0.44,b=0.87},
+    ["Warlock"]={r=0.53,g=0.53,b=0.93},      ["Warrior"]={r=0.78,g=0.61,b=0.23},
+}
+local CLASS_TABS = {"Death Knight","Druid","Hunter","Mage","Paladin","Priest","Rogue","Shaman","Warlock","Warrior","Raid","All"}
+local TAB_LABELS = {["Death Knight"]="DK",["Druid"]="Druid",["Hunter"]="Hunter",["Mage"]="Mage",["Paladin"]="Paladin",["Priest"]="Priest",["Rogue"]="Rogue",["Shaman"]="Shaman",["Warlock"]="Warlock",["Warrior"]="Warrior",["Raid"]="Raid",["All"]="All"}
+
+local TIER_COLORS = {
+    [18]={r=0.20,g=0.60,b=0.80},  -- T0: 5-man silver-blue (key 18, not 0)
+    [1]={r=0.70,g=0.36,b=0.00}, [2]={r=0.55,g=0.00,b=0.00},
+    [3]={r=0.18,g=0.49,b=0.20}, [4]={r=0.08,g=0.40,b=0.75},
+    [5]={r=0.42,g=0.10,b=0.54}, [6]={r=0.00,g=0.51,b=0.56},
+    [7]={r=0.52,g=0.42,b=0.00}, [8]={r=0.68,g=0.08,b=0.34},
+    [9]={r=0.33,g=0.43,b=0.48}, [10]={r=0.90,g=0.29,b=0.00},
+    [11]={r=0.00,g=0.41,b=0.36},[12]={r=0.16,g=0.21,b=0.58},
+    [13]={r=0.34,g=0.55,b=0.18},[14]={r=0.29,g=0.08,b=0.55},
+    [15]={r=0.00,g=0.38,b=0.39},[16]={r=0.53,g=0.06,b=0.31},
+    [17]={r=0.11,g=0.37,b=0.13},
+}
+local TIER_LABELS = {
+    [0]="T0 — 5-Man Dungeons",  -- display key stays 0
+    [1]="T1 — Molten Core & Onyxia",   [2]="T2 — Blackwing Lair",
+    [3]="T3 — Pre-AQ / Zul'Gurub",     [4]="T4 — AQ War",
+    [5]="T5 — Anh'Qiraj",              [6]="T6 — Naxxramas (Kel'Thuzad)",
+    [7]="T7 — Pre-TBC",                [8]="T8 — Karazhan / Gruul / Mag",
+    [9]="T9 — SSC & Tempest Keep",     [10]="T10 — Hyjal & Black Temple",
+    [11]="T11 — Zul'Aman",             [12]="T12 — Sunwell Plateau",
+    [13]="T13 — Naxx / EoE / OS",      [14]="T14 — Ulduar",
+    [15]="T15 — Trial of the Crusader",[16]="T16 — Icecrown Citadel",
+    [17]="T17 — Ruby Sanctum",
+}
+
+
+
+local ROLE_DEFS = {
+    {key="TNK", label="Tank",   color={r=0.20,g=0.60,b=1.00}, icon="Interface\\Icons\\Ability_Warrior_DefensiveStance"},
+    {key="HLR", label="Healer", color={r=0.20,g=1.00,b=0.40}, icon="Interface\\Icons\\Spell_ChargePositive"},
+    {key="DPS", label="DPS",    color={r=1.00,g=0.40,b=0.20}, icon="Interface\\Icons\\Ability_DualWield"},
+}
+local ROLE_BY_KEY = {}
+for _, rd in ipairs(ROLE_DEFS) do ROLE_BY_KEY[rd.key] = rd end
+
+-- Module-level class token -> class name map (used by Add Target, Add Group, etc.)
+local CLASS_TOKEN_MAP = {
+    DEATHKNIGHT="Death Knight", DRUID="Druid", HUNTER="Hunter",
+    MAGE="Mage", PALADIN="Paladin", PRIEST="Priest", ROGUE="Rogue",
+    SHAMAN="Shaman", WARLOCK="Warlock", WARRIOR="Warrior"
+}
+
+-- Raid abbreviations for tooltips
+local RAID_ABBR = {
+    ["Molten Core"]="MC", ["Onyxia's Lair"]="Ony", ["Blackwing Lair"]="BWL",
+    ["Zul'Gurub"]="ZG", ["Ruins of Ahn'Qiraj"]="AQ20", ["Ahn'Qiraj (AQ40)"]="AQ40",
+    ["Ahn'Qiraj (AQ20)"]="AQ20", ["Naxxramas (Classic)"]="Naxx60",
+    ["Karazhan"]="Kara", ["Gruul's Lair"]="Gruul", ["Magtheridon's Lair"]="Mag",
+    ["Serpentshrine Cavern"]="SSC", ["Tempest Keep"]="TK",
+    ["Mount Hyjal"]="Hyjal", ["Black Temple"]="BT", ["Zul'Aman"]="ZA",
+    ["Sunwell Plateau"]="SW",
+    ["Naxxramas 10"]="Naxx10", ["Naxxramas 25"]="Naxx25",
+    ["Eye of Eternity 10"]="EoE10", ["Eye of Eternity 25"]="EoE25",
+    ["Obsidian Sanctum 10"]="OS10", ["Obsidian Sanctum 25"]="OS25",
+    ["Ulduar 10"]="Uld10", ["Ulduar 25"]="Uld25",
+    ["Trial of the Crusader 10"]="ToC10", ["Trial of the Crusader 25"]="ToC25",
+    ["Trial of the Grand Crusader 10"]="ToGC10", ["Trial of the Grand Crusader 25"]="ToGC25",
+    ["Icecrown Citadel 10"]="ICC10", ["Icecrown Citadel 25"]="ICC25",
+    ["ICC 10 Heroic"]="ICC10H", ["ICC 25 Heroic"]="ICC25H",
+    ["Ruby Sanctum 10"]="RS10", ["Ruby Sanctum 25"]="RS25",
+    ["N/A (5-Man)"]="5-Man",
+}
+
+-- Class icon mapping for raid tab
+local CLASS_ICONS = {
+    ["Death Knight"] = "Interface\\Icons\\Spell_DeathKnight_ClassIcon",
+    ["Druid"]        = "Interface\\Icons\\Ability_Druid_Maul",
+    ["Hunter"]       = "Interface\\Icons\\INV_Weapon_Bow_07",
+    ["Mage"]         = "Interface\\Icons\\INV_Staff_13",
+    ["Paladin"]      = "Interface\\Icons\\Spell_Holy_HolyBolt",
+    ["Priest"]       = "Interface\\Icons\\INV_Staff_30",
+    ["Rogue"]        = "Interface\\Icons\\Ability_Stealth",
+    ["Shaman"]       = "Interface\\Icons\\Spell_Nature_BloodLust",
+    ["Warlock"]      = "Interface\\Icons\\Spell_Nature_FaerieFire",
+    ["Warrior"]      = "Interface\\Icons\\Ability_Warrior_BattleShout",
+}
+
+local activeTab = "All"
+local classPage = {}   -- classPage[cls] = current page (1-3)
+local allPage = 1      -- current page for All tab
+local tabButtons = {}
+local rowFrames = {}      -- rowFrames[i] = row frame for slot i
+local raidRowFrames = {}  -- raid tab row frames (40 slots)
+local raidDragPoll = CreateFrame("Frame")  -- module-level so it persists
+local raidMouseHeld = false
+local allRowFrames = {}   -- all tab row frames (60 slots)
+-- Raid drag state (module-level so RefreshRaidRows can reset)
+local raidDragSource = nil
+local raidDragOver   = nil
+local LichborneAllCountLabels = nil
+local LichborneRosterIlvlLabel = nil
+local LichborneRosterGsLabel = nil
+local LichborneRaidCountLabels = nil  -- populated in BuildRaidFrame, read in RefreshRaidRows
+local inspectWait = 0   -- shared timer for CalcGS and button callbacks
+local allFrameBuilt = false
+local LichborneAllFrame = nil
+local RefreshAllRows = nil  -- will be set after definition
+local RefreshRaidRows       -- forward declaration
+local UpdateSummary         -- forward declaration
+local raidFrameBuilt = false
+local setupDone = false
+local dragSourceRow = nil   -- row frame being dragged
+local dragOverTarget = nil  -- row frame mouse is currently over
+local dragOverlay = nil     -- visual drag indicator
+
+-- Buttons to lock during any invite or scan operation (excludes the invite btn itself which becomes Stop Invite, and excludes StopInspectBtn during scans)
+local LOCKABLE_BUTTONS = {
+    "LichborneAddTargetBtn",
+    "LichborneAddGroupBtn",
+    "LichborneUpdateGSBtn",
+    "LichborneUpdateTargetSpecBtn",
+    "LichborneUpdateGroupGSBtn",
+    "LichborneUpdateGroupSpecBtn",
+    "LichborneDisbandBtn",
+    "LichborneLoginBtn",
+    "LichborneLogoutBtn",
+    "LichborneMaintBtn",
+    "LichborneAutogearBtn",
+}
+
+local function SetButtonsLocked(locked)
+    for _, name in ipairs(LOCKABLE_BUTTONS) do
+        local btn = _G[name]
+        if btn then
+            if locked then btn:Disable(); btn:SetAlpha(0.35)
+            else btn:Enable(); btn:SetAlpha(1.0) end
+        end
+    end
+end
+
+-- During an invite, also lock the Stop (scan) button since no scan is running
+local function SetInviteActive(active)
+    SetButtonsLocked(active)
+    local stopBtn = _G["LichborneStopInspectBtn"]
+    if stopBtn then
+        if active then stopBtn:Disable(); stopBtn:SetAlpha(0.35)
+        else stopBtn:Enable(); stopBtn:SetAlpha(1.0) end
+    end
+end
+
+-- ── DB helpers ────────────────────────────────────────────────
+-- Migrate old 'gear' field to 'ilvl'
+local function MigrateGearField()
+    if not LichborneTrackerDB or not LichborneTrackerDB.rows then return end
+    for _, row in ipairs(LichborneTrackerDB.rows) do
+        if row.gear and not row.ilvl then
+            row.ilvl = row.gear
+            row.gear = nil
+        end
+        if not row.ilvl then
+            local g = {}
+            for i = 1, 17 do g[i] = 0 end
+            row.ilvl = g
+        end
+        if not row.ilvlLink then
+            local lnk = {}
+            for i = 1, 17 do lnk[i] = "" end
+            row.ilvlLink = lnk
+        end
+        if row.realGs == nil then row.realGs = 0 end
+    end
+end
+local function DefaultRow(cls)
+    local g = {}
+    for i = 1, GEAR_SLOTS do g[i] = 0 end
+    local lnk = {}
+    for i = 1, GEAR_SLOTS do lnk[i] = "" end
+    return {cls = cls or "", name = "", ilvl = g, ilvlLink = lnk, gs = 0, realGs = 0, spec = ""}
+end
+
+local function FindTrackedRowIndexByName(charName)
+    if not charName or charName == "" then return nil end
+    local needle = charName:lower()
+    for i, row in ipairs(LichborneTrackerDB.rows or {}) do
+        if row.name and row.name ~= "" and row.name:lower() == needle then
+            return i, row
+        end
+    end
+    return nil
+end
+
+local function RemoveCharacterReferences(charName)
+    if not charName or charName == "" then return false end
+
+    local removed = false
+    local rowIndex, rowData = FindTrackedRowIndexByName(charName)
+    if rowIndex and rowData then
+        LichborneTrackerDB.rows[rowIndex] = DefaultRow(rowData.cls)
+        removed = true
+    end
+
+    if LichborneTrackerDB.needs then
+        LichborneTrackerDB.needs[charName:lower()] = nil
+    end
+
+    if LichborneTrackerDB.raidRosters then
+        for _, roster in pairs(LichborneTrackerDB.raidRosters) do
+            if type(roster) == "table" then
+                for i, slot in ipairs(roster) do
+                    if slot and slot.name and slot.name ~= "" and slot.name:lower() == charName:lower() then
+                        roster[i] = {name="", cls="", spec="", gs=0, realGs=0, role="", notes=""}
+                    end
+                end
+            end
+        end
+    end
+
+    return removed
+end
+
+local function EnsureClass(cls)
+    if cls == "Raid" or cls == "All" then return end
+    -- Ensure we have MAX_ROWS * MAX_PAGES rows for this class (3 pages)
+    local count = 0
+    for _, row in ipairs(LichborneTrackerDB.rows) do
+        if row.cls == cls then count = count + 1 end
+    end
+    while count < MAX_ROWS * MAX_PAGES do
+        table.insert(LichborneTrackerDB.rows, DefaultRow(cls))
+        count = count + 1
+    end
+end
+
+local function GetAllClassRows(cls)
+    -- Returns ALL row indices for a class regardless of page (for add/search ops)
+    local out = {}
+    if cls == "Raid" or cls == "All" then return out end
+    for i, row in ipairs(LichborneTrackerDB.rows) do
+        if row.cls == cls then out[#out+1] = i end
+    end
+    return out
+end
+
+local classSortMode = nil  -- nil, "classspec", "gs"
+
+local function GetClassRows(cls)
+    local out = {}
+    if cls == "Raid" or cls == "All" then return out end
+    local page = classPage[cls] or 1
+    local startIdx = (page - 1) * ROWS_PER_PAGE + 1
+    local endIdx   = page * ROWS_PER_PAGE
+    local count = 0
+    -- Collect all matching indices for this class
+    local allIdx = {}
+    for i, row in ipairs(LichborneTrackerDB.rows) do
+        if row.cls == cls then
+            allIdx[#allIdx+1] = i
+        end
+    end
+    -- Apply sort if active
+    if classSortMode == "name" then
+        table.sort(allIdx, function(a, b)
+            local ra, rb = LichborneTrackerDB.rows[a], LichborneTrackerDB.rows[b]
+            local na, nb = ra.name or "", rb.name or ""
+            if (na == "") ~= (nb == "") then return na ~= "" end
+            return na < nb
+        end)
+    elseif classSortMode == "classspec" then
+        table.sort(allIdx, function(a, b)
+            local ra, rb = LichborneTrackerDB.rows[a], LichborneTrackerDB.rows[b]
+            local na, nb = ra.name or "", rb.name or ""
+            -- Empty rows always go to the bottom
+            if (na == "") ~= (nb == "") then return na ~= "" end
+            local sa, sb = ra.spec or "", rb.spec or ""
+            if sa ~= sb then return sa < sb end
+            return na < nb
+        end)
+    elseif classSortMode == "gs" then
+        table.sort(allIdx, function(a, b)
+            local ra, rb = LichborneTrackerDB.rows[a], LichborneTrackerDB.rows[b]
+            local na, nb = ra.name or "", rb.name or ""
+            if (na == "") ~= (nb == "") then return na ~= "" end
+            local ga, gb2 = ra.realGs or 0, rb.realGs or 0
+            if ga ~= gb2 then return ga > gb2 end
+            return na < nb
+        end)
+    end
+    -- Page slice
+    for _, i in ipairs(allIdx) do
+        count = count + 1
+        if count >= startIdx and count <= endIdx then
+            out[#out+1] = i
+        end
+    end
+    return out
+end
+
+-- ── Item quality colors (matches WoW item rarity) ─────────────
+local QUALITY_COLORS = {
+    [0] = {r=0.62, g=0.62, b=0.62},  -- Poor (grey)
+    [1] = {r=1.00, g=1.00, b=1.00},  -- Common (white)
+    [2] = {r=0.12, g=0.85, b=0.12},  -- Uncommon (green)
+    [3] = {r=0.00, g=0.44, b=0.87},  -- Rare (blue)
+    [4] = {r=0.64, g=0.21, b=0.93},  -- Epic (purple)
+    [5] = {r=1.00, g=0.50, b=0.00},  -- Legendary (orange)
+    [6] = {r=0.90, g=0.80, b=0.50},  -- Artifact (pale gold)
+}
+
+local function GetItemQualityColor(link)
+    if not link or link == "" then return nil end
+    local _, _, rarity = GetItemInfo(link)
+    if rarity then return QUALITY_COLORS[rarity] end
+    return nil
+end
+
+-- ── Tier color ────────────────────────────────────────────────
+local function ApplyTierColor(gb, val, qualityColor)
+    local n = tonumber(val) or 0
+    local c = TIER_COLORS[n]
+    if c then
+        gb:SetBackdropColor(c.r, c.g, c.b, 1)
+        gb:SetBackdropBorderColor(math.min(c.r*1.5,1), math.min(c.g*1.5,1), math.min(c.b*1.5,1), 1)
+    else
+        gb:SetBackdropColor(0.05, 0.07, 0.14, 1)
+        gb:SetBackdropBorderColor(0.12, 0.18, 0.30, 0.8)
+    end
+    -- Text color: use item quality color if available, otherwise white
+    if qualityColor then
+        gb:SetTextColor(qualityColor.r, qualityColor.g, qualityColor.b)
+    elseif c and (0.299*c.r + 0.587*c.g + 0.114*c.b) > 0.45 then
+        gb:SetTextColor(0.05, 0.05, 0.05)
+    else
+        gb:SetTextColor(1, 1, 1)
+    end
+end
+
+-- ── Tab highlight ─────────────────────────────────────────────
+local allSortMenus = {}
+local function CloseAllSortMenus()
+    for _, m in ipairs(allSortMenus) do m:Hide() end
+end
+
+local activeInviteFrame = nil
+
+local function UpdateInviteButtons()
+    local tier = (LichborneTrackerDB and LichborneTrackerDB.raidTier) or 0
+
+    -- Raid invite button: show for tier != 0, toggle red/green based on active invite
+    if LichborneInviteRaidBtn then
+        if tier ~= 0 then
+            LichborneInviteRaidBtn:Show()
+            if activeInviteFrame then
+                -- Stop Invite state: red background, red-tinted label
+                LichborneInviteRaidBtn:SetBackdropColor(0.25, 0.05, 0.05, 1)
+                if LichborneInviteRaidBtn.lbl then
+                    LichborneInviteRaidBtn.lbl:SetText("|cffd4af37Stop Invite|r")
+                end
+            else
+                -- Invite Raid state: green background
+                LichborneInviteRaidBtn:SetBackdropColor(0.05, 0.20, 0.05, 1)
+                if LichborneInviteRaidBtn.lbl then
+                    LichborneInviteRaidBtn.lbl:SetText("|cffd4af37Invite Raid|r")
+                end
+            end
+        else
+            LichborneInviteRaidBtn:Hide()
+        end
+    end
+    -- Group invite button: show for tier == 0, toggle red/green based on active invite
+    if _G["LichborneInviteGroupBtn"] then
+        local grpBtn = _G["LichborneInviteGroupBtn"]
+        if tier == 0 then
+            grpBtn:Show()
+            if activeInviteFrame then
+                grpBtn:SetBackdropColor(0.25, 0.05, 0.05, 1)
+                if grpBtn.lbl then grpBtn.lbl:SetText("|cffd4af37Stop Invite|r") end
+            else
+                grpBtn:SetBackdropColor(0.05, 0.25, 0.30, 1)
+                if grpBtn.lbl then grpBtn.lbl:SetText("|cffd4af37Invite Group|r") end
+            end
+        else
+            grpBtn:Hide()
+        end
+    end
+end
+
+local function UpdateTabs()
+    if LichborneSpecMenu then LichborneSpecMenu:Hide() end
+    if _G["LichbornePageDDMenu"] then _G["LichbornePageDDMenu"]:Hide() end
+    CloseAllSortMenus()
+    if _G["LichborneAllGroupMenu"] then _G["LichborneAllGroupMenu"]:Hide() end
+    -- Close raid tab dropdowns when switching away
+    if _G["LichborneRaidTierMenu"] then _G["LichborneRaidTierMenu"]:Hide() end
+    if _G["LichborneRaidRaidMenu"] then _G["LichborneRaidRaidMenu"]:Hide() end
+    if _G["LichborneRaidGroupMenu"] then _G["LichborneRaidGroupMenu"]:Hide() end
+    for cls, btn in pairs(tabButtons) do
+        local c = CLASS_COLORS[cls]
+        if cls == activeTab then
+            btn:SetAlpha(1.0)
+            if c then
+                btn.bg:SetTexture(c.r*0.45, c.g*0.45, c.b*0.45, 1)
+                btn.bottomLine:SetTexture(c.r, c.g, c.b, 1)
+            elseif cls == "Raid" then
+                btn.bg:SetTexture(0.42, 0.22, 0.00, 1)
+                btn.bottomLine:SetTexture(0.70, 0.36, 0.00, 1)
+            elseif cls == "All" then
+                btn.bg:SetTexture(0.20, 0.45, 0.20, 1)
+                btn.bottomLine:SetTexture(0.40, 0.90, 0.40, 1)
+            end
+        else
+            btn:SetAlpha(0.5)
+            btn.bg:SetTexture(0.05, 0.07, 0.12, 1)
+            btn.bottomLine:SetTexture(0, 0, 0, 0)
+        end
+    end
+    -- Show/hide raid frame vs normal rows+headers
+    if LichborneRaidFrame then
+        local isRaid = activeTab == "Raid"
+        local isAll = activeTab == "All"
+        if isAll then
+            if LichborneAllFrame then LichborneAllFrame:Show() end
+            if LichborneRaidFrame then LichborneRaidFrame:Hide() end
+            if LichborneHeaderBar then LichborneHeaderBar:Hide() end
+            if LichborneAvgBar then LichborneAvgBar:Hide() end
+            if LichborneCountBar then LichborneCountBar:Hide() end
+            if _G["LichborneRaidCountBar"] then _G["LichborneRaidCountBar"]:Hide() end
+            for _, rf in ipairs(rowFrames) do rf:Hide() end
+            UpdateInviteButtons()
+        elseif isRaid then
+            LichborneRaidFrame:Show()
+            if LichborneAllFrame then LichborneAllFrame:Hide() end
+            if LichborneHeaderBar then LichborneHeaderBar:Hide() end
+            if LichborneAvgBar then LichborneAvgBar:Hide() end
+            if LichborneCountBar then LichborneCountBar:Hide() end
+            for _, rf in ipairs(rowFrames) do rf:Hide() end
+            if _G["LichborneRaidCountBar"] then _G["LichborneRaidCountBar"]:Show() end
+            UpdateInviteButtons()
+        elseif not isAll then
+            LichborneRaidFrame:Hide()
+            if LichborneAllFrame then LichborneAllFrame:Hide() end
+            if LichborneHeaderBar then LichborneHeaderBar:Show() end
+            if LichborneAvgBar then LichborneAvgBar:Show() end
+            if LichborneCountBar then LichborneCountBar:Show() end
+            if _G["LichborneRaidCountBar"] then _G["LichborneRaidCountBar"]:Hide() end
+            UpdateInviteButtons()
+        end
+    end
+end
+
+-- ── Row hover highlight helper ─────────────────────────────────
+-- Hooks OnEnter/OnLeave on a child frame to show/hide the parent row highlight
+local function HookRowHighlight(child, row, hovTex)
+    local orig_enter = child:GetScript("OnEnter")
+    local orig_leave = child:GetScript("OnLeave")
+    child:SetScript("OnEnter", function()
+        hovTex:SetTexture(0.78, 0.61, 0.23, 0.12)
+        if orig_enter then orig_enter() end
+    end)
+    child:SetScript("OnLeave", function()
+        -- Only hide if mouse isn't still on the row
+        local f = GetMouseFocus()
+        if f ~= row then
+            hovTex:SetTexture(0, 0, 0, 0)
+        end
+        if orig_leave then orig_leave() end
+    end)
+end
+
+
+local needsCellFrames = {}
+
+local MAX_NEEDS_DISPLAY = MAX_NEEDS
+
+local function RefreshNeedsCell(cf, charName)
+    if not cf or not cf.icons then return end
+    local needs = GetNeeds(charName)
+    local active = {}
+    for _, slot in ipairs(NEEDS_SLOTS) do
+        if needs[slot.key] then active[#active+1] = slot end
+    end
+    local show = math.min(#active, MAX_NEEDS_DISPLAY)
+    for idx = 1, show do
+        local ic = cf.icons[idx]
+        if ic then ic:SetTexture(active[idx].icon); ic:SetAlpha(1); ic:Show() end
+    end
+    for j = show+1, MAX_NEEDS_DISPLAY do
+        if cf.icons[j] then cf.icons[j]:Hide() end
+    end
+end
+
+local function RefreshAllNeedsCells()
+    for _, entry in ipairs(needsCellFrames) do
+        if entry.frame and entry.getCharName then
+            RefreshNeedsCell(entry.frame, entry.getCharName())
+        end
+    end
+end
+
+local function ClosePicker()
+    if needsPicker then needsPicker:Hide() end
+    needsPickerOwner = nil
+end
+
+local function BuildPickerIfNeeded()
+    if needsPicker then return end
+    local COLS, BSIZE, PAD = 5, 26, 4
+    local ROWS = math.ceil(#NEEDS_SLOTS / COLS)
+    local W = COLS*(BSIZE+PAD)+PAD
+    local H = ROWS*(BSIZE+PAD)+PAD+20
+    local pf = CreateFrame("Frame","LichborneNeedsPicker",UIParent)
+    pf:SetFrameStrata("TOOLTIP"); pf:SetFrameLevel(200)
+    pf:SetSize(W,H)
+    pf:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+    pf:SetBackdropColor(0.04,0.06,0.12,0.98); pf:SetBackdropBorderColor(0.78,0.61,0.23,1)
+    local ttl = pf:CreateFontString(nil,"OVERLAY","GameFontNormalSmall")
+    ttl:SetPoint("TOPLEFT",pf,"TOPLEFT",6,-5); pf.title=ttl
+    pf.slotBtns = {}
+    for si, slot in ipairs(NEEDS_SLOTS) do
+        local col = (si-1)%COLS
+        local row = math.floor((si-1)/COLS)
+        local btn = CreateFrame("Button",nil,pf)
+        btn:SetSize(BSIZE,BSIZE)
+        btn:SetPoint("TOPLEFT",pf,"TOPLEFT",PAD+col*(BSIZE+PAD),-20-PAD-row*(BSIZE+PAD))
+        btn:SetFrameLevel(pf:GetFrameLevel()+1)
+        local bg=btn:CreateTexture(nil,"BACKGROUND"); bg:SetAllPoints(btn); bg:SetTexture(0.08,0.10,0.18,1)
+        local tex=btn:CreateTexture(nil,"ARTWORK")
+        tex:SetPoint("CENTER",btn,"CENTER",0,0); tex:SetSize(BSIZE-4,BSIZE-4); tex:SetTexture(slot.icon)
+        btn.tex=tex
+        local hi=btn:CreateTexture(nil,"OVERLAY")
+        hi:SetAllPoints(btn); hi:SetTexture(0.3,0.8,0.3,0.35); hi:Hide(); btn.hi=hi
+        btn:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=8,edgeSize=6,insets={left=1,right=1,top=1,bottom=1}})
+        btn:SetBackdropColor(0.08,0.10,0.18,1); btn:SetBackdropBorderColor(0.25,0.35,0.55,0.8)
+        btn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+        btn.slotKey=slot.key; btn.slotLabel=slot.label
+        btn:SetScript("OnEnter",function()
+            -- Update picker title to show slot name instead of using GameTooltip
+            if pf.title then
+                local owned = needsPickerOwner and GetNeeds(needsPickerOwner)[slot.key]
+                local hint = owned and "|cffff6666  (right-click to remove)|r" or "|cff66ff66  click to mark|r"
+                pf.title:SetText("|cffC69B3A"..slot.label.."|r"..hint)
+            end
+        end)
+        btn:SetScript("OnLeave",function()
+            -- Restore title to character name
+            if pf.title and needsPickerOwner then
+                pf.title:SetText("|cffC69B3ANeeds: |r|cffffff00"..needsPickerOwner.."|r")
+            end
+        end)
+        btn:SetScript("OnClick",function(_, mouseButton)
+            if not needsPickerOwner or needsPickerOwner=="" then return end
+            local k=slot.key
+            local cur=GetNeeds(needsPickerOwner)[k]
+            if mouseButton=="RightButton" then SetNeed(needsPickerOwner,k,false)
+            else SetNeed(needsPickerOwner,k,not cur) end
+            local needs2=GetNeeds(needsPickerOwner)
+            local count2=0; for _ in pairs(needs2) do count2=count2+1 end
+            for _,sb in ipairs(pf.slotBtns) do
+                if needs2[sb.slotKey] then
+                    sb.hi:Show(); sb:SetBackdropBorderColor(0.3,0.8,0.3,0.9); sb.tex:SetAlpha(1)
+                elseif count2 >= MAX_NEEDS then
+                    sb.hi:Hide(); sb:SetBackdropBorderColor(0.15,0.15,0.15,0.5); sb.tex:SetAlpha(0.35)
+                else
+                    sb.hi:Hide(); sb:SetBackdropBorderColor(0.25,0.35,0.55,0.8); sb.tex:SetAlpha(1)
+                end
+            end
+            RefreshAllNeedsCells()
+        end)
+        btn:RegisterForClicks("LeftButtonUp","RightButtonUp")
+        pf.slotBtns[si]=btn
+    end
+    -- Close when mouse leaves the picker (with a small grace period)
+    pf.closeTimer = 0
+    pf:SetScript("OnUpdate",function(_, elapsed)
+        if not pf:IsShown() then return end
+        if not MouseIsOver(pf) then
+            pf.closeTimer = (pf.closeTimer or 0) + elapsed
+            if pf.closeTimer > 0.3 then
+                ClosePicker()
+            end
+        else
+            pf.closeTimer = 0
+        end
+    end)
+    -- ESC closes picker but not the main frame
+    pf:SetScript("OnKeyDown", function(_, key)
+        if key == "ESCAPE" then ClosePicker() end
+    end)
+    pf:EnableKeyboard(true)
+    needsPicker=pf
+end
+
+local function OpenNeedsPicker(anchorFrame, charName)
+    if not charName or charName=="" then return end
+    BuildPickerIfNeeded()
+    needsPickerOwner=charName
+    needsPicker.title:SetText("|cffC69B3ANeeds: |r|cffffff00"..charName.."|r")
+    local needs3=GetNeeds(charName)
+    local count3=0; for _ in pairs(needs3) do count3=count3+1 end
+    for _,sb in ipairs(needsPicker.slotBtns) do
+        if needs3[sb.slotKey] then
+            sb.hi:Show(); sb:SetBackdropBorderColor(0.3,0.8,0.3,0.9); sb.tex:SetAlpha(1)
+        elseif count3 >= MAX_NEEDS then
+            sb.hi:Hide(); sb:SetBackdropBorderColor(0.15,0.15,0.15,0.5); sb.tex:SetAlpha(0.35)
+        else
+            sb.hi:Hide(); sb:SetBackdropBorderColor(0.25,0.35,0.55,0.8); sb.tex:SetAlpha(1)
+        end
+    end
+    needsPicker:ClearAllPoints()
+    needsPicker:SetPoint("TOPLEFT",anchorFrame,"BOTTOMLEFT",0,-2)
+    needsPicker.closeTimer = 0
+    needsPicker:Show(); needsPicker:Raise()
+end
+
+local function MakeNeedsCell(parent, xOff, rowH, getCharName, hovTex, overrideW)
+    local cellW = overrideW or 80
+    local cf = CreateFrame("Button",nil,parent)
+    cf:SetPoint("LEFT",parent,"LEFT",xOff,0)
+    cf:SetSize(cellW,rowH-2)
+    cf:SetFrameLevel(parent:GetFrameLevel()+4)
+    cf:RegisterForClicks("LeftButtonUp","RightButtonUp")
+    cf:SetBackdrop({bgFile="Interface\\Tooltips\\UI-Tooltip-Background",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=1,right=1,top=1,bottom=1}})
+    cf:SetBackdropColor(0.04,0.06,0.12,0.9); cf:SetBackdropBorderColor(0.15,0.22,0.38,0.6)
+    -- No SetHighlightTexture - border changes on hover instead
+    cf.icons={}
+    for si=1,MAX_NEEDS_DISPLAY do
+        local ic=cf:CreateTexture(nil,"ARTWORK")
+        ic:SetSize(NEEDS_ICON_SIZE,NEEDS_ICON_SIZE)
+        ic:SetPoint("LEFT",cf,"LEFT",2+(si-1)*(NEEDS_ICON_SIZE+2),0)
+        ic:Hide(); cf.icons[si]=ic
+    end
+    cf:SetScript("OnClick",function(_, mouseButton)
+        local cname=getCharName()
+        if not cname or cname=="" then return end
+        if mouseButton=="RightButton" then
+            if LichborneTrackerDB.needs then LichborneTrackerDB.needs[cname:lower()]={} end
+            RefreshAllNeedsCells(); ClosePicker(); return
+        end
+        if needsPicker and needsPicker:IsShown() and needsPickerOwner==cname then
+            ClosePicker()
+        else
+            ClosePicker(); OpenNeedsPicker(cf,cname)
+        end
+    end)
+    cf:SetScript("OnEnter",function()
+        if hovTex then hovTex:SetTexture(0.78,0.61,0.23,0.12) end
+        cf:SetBackdropBorderColor(0.78,0.61,0.23,0.9)
+        local cname=getCharName()
+        if cname and cname~="" then
+            GameTooltip:SetOwner(cf,"ANCHOR_RIGHT")
+            GameTooltip:AddLine("|cffC69B3ANeeds:|r "..cname,1,1,1)
+            local needs4=GetNeeds(cname)
+            local any=false
+            for _,slot in ipairs(NEEDS_SLOTS) do
+                if needs4[slot.key] then GameTooltip:AddLine("  "..slot.label,1,0.6,0.2); any=true end
+            end
+            if not any then GameTooltip:AddLine("  Nothing marked",0.5,0.5,0.5) end
+            GameTooltip:AddLine("|cff888888Click to edit  (max 2)  Right-click clears all|r",0.6,0.6,0.6)
+            GameTooltip:Show()
+        end
+    end)
+    cf:SetScript("OnLeave",function()
+        if hovTex then hovTex:SetTexture(0,0,0,0) end
+        cf:SetBackdropBorderColor(0.15,0.22,0.38,0.6)
+        GameTooltip:Hide()
+    end)
+    needsCellFrames[#needsCellFrames+1]={frame=cf,getCharName=getCharName}
+    return cf
+end
+
+
+
+
+-- ── Raid tab: RefreshRaidRows ──────────────────────────────────
+local raidSortMode = nil  -- nil, "name", "classspec", "gs"
+local allSortMode  = nil  -- nil, "name", "classspec", "gs"
+
+local function SortRaidRows()
+    if not raidSortMode then return end
+    local roster, raidSize = GetCurrentRoster()
+    local filled, empty = {}, {}
+    for i = 1, MAX_RAID_SLOTS do
+        local r = roster[i]
+        if r and r.name and r.name ~= "" then
+            filled[#filled+1] = r
+        else
+            empty[#empty+1] = {name="", cls="", spec="", gs=0, realGs=0}
+        end
+    end
+    if raidSortMode == "name" then
+        table.sort(filled, function(a, b) return (a.name or "") < (b.name or "") end)
+    elseif raidSortMode == "classspec" then
+        table.sort(filled, function(a, b)
+            if (a.cls or "") ~= (b.cls or "") then return (a.cls or "") < (b.cls or "") end
+            if (a.spec or "") ~= (b.spec or "") then return (a.spec or "") < (b.spec or "") end
+            return (a.name or "") < (b.name or "")
+        end)
+    elseif raidSortMode == "gs" then
+        table.sort(filled, function(a, b)
+            local ga, gb2 = a.realGs or 0, b.realGs or 0
+            if ga ~= gb2 then return ga > gb2 end
+            return (a.name or "") < (b.name or "")
+        end)
+    end
+    local idx = 1
+    for _, r in ipairs(filled) do roster[idx] = r; idx = idx + 1 end
+    for _, r in ipairs(empty)  do roster[idx] = r; idx = idx + 1 end
+end
+
+
+function RefreshRaidRows()
+    if not raidRowFrames or #raidRowFrames == 0 then return end
+    -- Cancel any in-progress drag when refreshing
+    raidDragSource = nil
+
+    -- Remove anyone from the current roster who no longer exists in class tabs
+    local classTabNames = {}
+    if LichborneTrackerDB.rows then
+        for _, classRow in ipairs(LichborneTrackerDB.rows) do
+            if classRow.name and classRow.name ~= "" then
+                classTabNames[classRow.name:lower()] = true
+            end
+        end
+    end
+    local roster, _ = GetCurrentRoster()
+    for i = 1, 40 do
+        if roster[i] and roster[i].name and roster[i].name ~= "" then
+            if not classTabNames[roster[i].name:lower()] then
+                roster[i] = {name="", cls="", spec="", gs=0}
+            end
+        end
+    end
+
+    SortRaidRows()
+    local rows, raidSize = GetCurrentRoster()
+    for i = 1, MAX_RAID_SLOTS do
+        local rf = raidRowFrames[i]
+        if not rf then break end
+        -- Hide rows beyond current raid size
+        if i > raidSize then
+            rf:Hide()
+        else
+            rf:Show()
+        end
+        local data = rows[i] or {name="", cls="", spec="", gs=0, role="", notes=""}
+
+        -- Class icon
+        local cIcon = CLASS_ICONS[data.cls]
+        if rf.classIcon then
+            if cIcon then rf.classIcon:SetTexture(cIcon); rf.classIcon:SetAlpha(1)
+            else rf.classIcon:SetTexture(0,0,0,0) end
+        end
+
+        -- Sync spec from class tab rows (refresh keeps it current)
+        if data.name and data.name ~= "" then
+            for _, classRow in ipairs(LichborneTrackerDB.rows) do
+                if classRow.name and classRow.name:lower() == data.name:lower() then
+                    if classRow.spec and classRow.spec ~= "" then
+                        data.spec = classRow.spec
+                    end
+                    data.realGs = classRow.realGs or 0
+                    break
+                end
+            end
+        end
+
+        -- Spec icon
+        local sIcon = data.spec and data.spec ~= "" and SPEC_ICONS[data.spec]
+        if rf.specIcon then
+            if sIcon then
+                rf.specIcon:SetTexture(sIcon); rf.specIcon:SetAlpha(1)
+            elseif data.name and data.name ~= "" then
+                rf.specIcon:SetTexture("Interface\\Icons\\INV_Misc_QuestionMark"); rf.specIcon:SetAlpha(0.2)
+            else
+                rf.specIcon:SetTexture(0,0,0,0)
+            end
+        end
+
+        -- Needs cell refresh
+        if rf.needsCell then
+            RefreshNeedsCell(rf.needsCell, data.name or "")
+        end
+
+        -- Role button
+        if rf.roleBtn and rf.roleLbl then
+            if not data.role then data.role = "" end
+            local rd = ROLE_BY_KEY[data.role]
+            if rd then
+                rf.roleLbl:SetText("")
+                rf.roleBtn:SetBackdropBorderColor(rd.color.r, rd.color.g, rd.color.b, 0.9)
+                if rf.roleIcon then rf.roleIcon:SetTexture(rd.icon); rf.roleIcon:SetAlpha(1.0) end
+            else
+                rf.roleLbl:SetText("")
+                rf.roleBtn:SetBackdropBorderColor(0.20,0.30,0.50,0.3)
+                if rf.roleIcon then rf.roleIcon:SetTexture(0,0,0,0) end
+            end
+            local idx = i
+            rf.roleBtn:SetScript("OnEnter", function()
+                local roster2, _ = GetCurrentRoster()
+                local d2 = roster2[idx]
+                GameTooltip:SetOwner(rf.roleBtn, "ANCHOR_RIGHT")
+                GameTooltip:AddLine("Assign Role  (click to cycle)",1,1,1)
+                for _, rdef in ipairs(ROLE_DEFS) do
+                    local cur = (d2 and d2.role == rdef.key) and " ◄" or ""
+                    GameTooltip:AddLine("|T"..rdef.icon..":14:14|t  "..rdef.key.."  "..rdef.label..cur, rdef.color.r, rdef.color.g, rdef.color.b)
+                end
+                GameTooltip:AddLine("--  None (clear)", 0.5,0.6,0.7)
+                GameTooltip:Show()
+            end)
+            rf.roleBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+            rf.roleBtn:SetScript("OnClick", function()
+                local roster2, _ = GetCurrentRoster()
+                local d2 = roster2[idx]
+                if not d2 or not d2.name or d2.name == "" then return end
+                local cur = d2.role or ""
+                -- Cycle: ""->TNK->HLR->DPS->""
+                if cur == "" or cur == nil then
+                    d2.role = "TNK"
+                elseif cur == "TNK" then
+                    d2.role = "HLR"
+                elseif cur == "HLR" then
+                    d2.role = "DPS"
+                else
+                    d2.role = ""
+                end
+                RefreshRaidRows()
+            end)
+        end
+
+        -- Notes
+        if rf.notesBox then
+            rf.notesBox:SetScript("OnTextChanged", nil)
+            rf.notesBox:SetText(data.notes or "")
+            local idx = i
+            rf.notesBox:SetScript("OnTextChanged", function()
+                local r2, _ = GetCurrentRoster()
+                if r2[idx] then r2[idx].notes = rf.notesBox:GetText() end
+            end)
+        end
+
+        -- Name
+        if rf.nameBox then
+            rf.nameBox:SetScript("OnTextChanged", nil)
+            rf.nameBox:SetText(data.name or "")
+            local c = CLASS_COLORS[data.cls]
+            if c then rf.nameBox:SetTextColor(c.r, c.g, c.b)
+            else rf.nameBox:SetTextColor(0.9, 0.95, 1.0) end
+            local idx = i
+            rf.nameBox:SetScript("OnTextChanged", function()
+local r2, _ = GetCurrentRoster(); r2[idx].name = rf.nameBox:GetText()
+            end)
+        end
+
+        -- iLvl
+        if rf.gsBox then
+            rf.gsBox:SetScript("OnTextChanged", nil)
+            rf.gsBox:SetText(data.gs and data.gs > 0 and tostring(data.gs) or "")
+            local idx = i
+            rf.gsBox:SetScript("OnTextChanged", function()
+                local raw = rf.gsBox:GetText()
+                local clean = raw:gsub("%D","")
+                if clean ~= raw then rf.gsBox:SetText(clean); return end
+local r3, _ = GetCurrentRoster(); r3[idx].gs = tonumber(clean) or 0
+            end)
+        end
+
+        -- GS
+        if rf.realGsBox then
+            rf.realGsBox:SetScript("OnTextChanged", nil)
+            rf.realGsBox:SetText(data.realGs and data.realGs > 0 and tostring(data.realGs) or "")
+            local idx = i
+            rf.realGsBox:SetScript("OnTextChanged", function()
+                local raw = rf.realGsBox:GetText()
+                local clean = raw:gsub("%D","")
+                if clean ~= raw then rf.realGsBox:SetText(clean); return end
+local r4, _ = GetCurrentRoster(); r4[idx].realGs = tonumber(clean) or 0
+            end)
+        end
+
+
+
+
+        -- Spec icon hover - reads live from rows[i] at hover time
+        if rf.specBtn then
+            local rowIdx = i
+            rf.specBtn:SetScript("OnEnter", function()
+                local roster4, _ = GetCurrentRoster()
+                local d4 = roster4[rowIdx]
+                local spec = d4 and d4.spec or ""
+                local cls = d4 and d4.cls or ""
+                local c = cls ~= "" and CLASS_COLORS[cls]
+                GameTooltip:SetOwner(rf.specBtn, "ANCHOR_RIGHT")
+                if spec ~= "" then GameTooltip:AddLine(spec, 1, 1, 1) end
+                if cls ~= "" then
+                    if c then GameTooltip:AddLine(cls, c.r, c.g, c.b)
+                    else GameTooltip:AddLine(cls, 0.8, 0.8, 0.9) end
+                end
+                if spec == "" and cls == "" then GameTooltip:AddLine("Empty", 0.4, 0.4, 0.4) end
+                GameTooltip:Show()
+            end)
+            rf.specBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        end
+
+        -- Delete button
+        if rf.delBtn then
+            local idx = i
+            rf.delBtn:SetScript("OnClick", function()
+local r5, _ = GetCurrentRoster(); r5[idx] = {name="", cls="", spec="", gs=0, realGs=0, role="", notes=""}
+                RefreshRaidRows()
+            end)
+        end
+    end
+
+    -- Update raid class count bar
+    if LichborneRaidCountLabels then
+        local raidCounts = {}
+        for _, cls in ipairs(CLASS_TABS) do if cls ~= "Raid" then raidCounts[cls] = 0 end end
+        local rosterC, sizeC = GetCurrentRoster()
+        for i2 = 1, sizeC do
+            local r2 = rosterC[i2]
+            if r2 and r2.name and r2.name ~= "" and raidCounts[r2.cls] then
+                raidCounts[r2.cls] = raidCounts[r2.cls] + 1
+            end
+        end
+        for cls, lbl in pairs(LichborneRaidCountLabels) do
+            local c = CLASS_COLORS[cls]
+            if c then
+                local hex = string.format("|cff%02x%02x%02x", math.floor(c.r*255), math.floor(c.g*255), math.floor(c.b*255))
+                local n = raidCounts[cls] or 0
+                lbl:SetText(hex..(TAB_LABELS[cls])..": |cffd4af37"..n.."|r")
+                -- Color background if has members
+                local sw = lbl:GetParent()
+                if sw and sw.bg then
+                    if n > 0 then sw.bg:SetTexture(c.r*0.25, c.g*0.25, c.b*0.30, 1)
+                    else sw.bg:SetTexture(0.08, 0.10, 0.18, 1) end
+                end
+            end
+        end
+    end
+end
+
+
+
+-- ── Build row frames (once) ───────────────────────────────────
+local function BuildRows(parent, yStart)
+    if #rowFrames > 0 then return end  -- already built
+
+    for i = 1, MAX_ROWS do
+        local row = CreateFrame("Frame", "LichborneRow"..i, parent)
+        row:SetPoint("TOPLEFT", parent, "TOPLEFT", 15, yStart - (i-1)*ROW_HEIGHT)
+        row:SetSize(1086, ROW_HEIGHT)
+
+        local bg = row:CreateTexture(nil, "BACKGROUND")
+        bg:SetAllPoints(row)
+        bg:SetTexture(0.05, 0.07, 0.13, 1)
+        row.bg = bg
+
+        -- Hover
+        local hov = row:CreateTexture(nil, "OVERLAY")
+        hov:SetAllPoints(row)
+        hov:SetTexture(0, 0, 0, 0)
+        row.hov = hov
+
+        -- Drop highlight
+        local dropHi = row:CreateTexture(nil, "OVERLAY")
+        dropHi:SetAllPoints(row)
+        dropHi:SetTexture(0, 0, 0, 0)
+        row.dropHi = dropHi
+
+        row:EnableMouse(true)
+        row:SetScript("OnEnter", function()
+            if not dragSourceRow then
+                row.hov:SetTexture(0.78, 0.61, 0.23, 0.12)
+            end
+        end)
+        row:SetScript("OnLeave", function()
+            row.hov:SetTexture(0, 0, 0, 0)
+        end)
+
+        -- Drag handle
+        local dragBtn = CreateFrame("Button", nil, row)
+        dragBtn:SetPoint("LEFT", row, "LEFT", DRAG_OFF, 0)
+        dragBtn:SetSize(COL_DRAG_W, ROW_HEIGHT)
+        dragBtn:SetFrameLevel(row:GetFrameLevel() + 5)
+        local dragTex = dragBtn:CreateTexture(nil, "ARTWORK")
+        dragTex:SetAllPoints(dragBtn)
+        dragTex:SetTexture("Interface\\ChatFrame\\ChatFrameBackground")
+        dragTex:SetVertexColor(0.3, 0.4, 0.6, 0)  -- invisible by default
+        row.dragTex = dragTex
+        local dragLbl = dragBtn:CreateFontString(nil, "OVERLAY")
+        dragLbl:SetFont("Fonts\\FRIZQT__.TTF", 9, "OUTLINE")
+        dragLbl:SetAllPoints(dragBtn)
+        dragLbl:SetJustifyH("CENTER"); dragLbl:SetJustifyV("MIDDLE")
+        dragLbl:SetTextColor(0.4, 0.4, 0.5, 1.0)
+        dragLbl:SetText(tostring(i))
+        row.dragLbl = dragLbl
+        dragBtn:SetScript("OnEnter", function()
+            if not dragSourceRow then
+                row.dragLbl:SetTextColor(0.78, 0.61, 0.23, 1.0)
+                GameTooltip:SetOwner(dragBtn, "ANCHOR_RIGHT")
+                GameTooltip:AddLine("Drag to reorder", 1, 1, 1)
+                GameTooltip:Show()
+            end
+        end)
+        dragBtn:SetScript("OnLeave", function()
+            if not dragSourceRow then
+                row.dragLbl:SetTextColor(0.4, 0.4, 0.5, 1.0)
+            end
+            GameTooltip:Hide()
+        end)
+        dragBtn:SetScript("OnMouseDown", function(_, mouseButton)
+            if mouseButton == "LeftButton" and row.dbIndex then
+                local data = LichborneTrackerDB.rows[row.dbIndex]
+                if data and data.name and data.name ~= "" then
+                    dragSourceRow = row
+                    row.dragLbl:SetTextColor(0.78, 0.61, 0.23, 1.0)
+                    row.hov:SetTexture(0.9, 0.7, 0.1, 0.12)
+                end
+            end
+        end)
+
+        -- Spec icon (click to set spec manually)
+        local specBtn = CreateFrame("Button", "LichborneRow"..i.."SpecBtn", row)
+        specBtn:SetPoint("LEFT", row, "LEFT", SPEC_OFF, 0)
+        specBtn:SetSize(COL_SPEC_W - 2, ROW_HEIGHT - 2)
+        specBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight", "ADD")
+        local specIcon = specBtn:CreateTexture(nil, "ARTWORK")
+        specIcon:SetAllPoints(specBtn)
+        specIcon:SetTexture(0, 0, 0, 0)
+        specBtn.icon = specIcon
+        row.specIcon = specIcon
+        row.specBtn = specBtn
+        specBtn:SetScript("OnEnter", function()
+            if row.dbIndex and LichborneTrackerDB.rows[row.dbIndex] then
+                local spec = LichborneTrackerDB.rows[row.dbIndex].spec or ""
+                GameTooltip:SetOwner(specBtn, "ANCHOR_RIGHT")
+                GameTooltip:AddLine(spec ~= "" and spec or "No spec set", 1, 1, 1)
+                GameTooltip:AddLine("Click to set spec manually", 0.7, 0.7, 0.7)
+                GameTooltip:Show()
+            end
+        end)
+        specBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        specBtn:SetScript("OnClick", function()
+            if not row.dbIndex then return end
+            local rowData = LichborneTrackerDB.rows[row.dbIndex]
+            if not rowData then return end
+            -- Don't allow setting spec on empty rows
+            if not rowData.name or rowData.name == "" then return end
+            -- Only show specs for the row's own class, not the active tab
+            local cls = rowData.cls or ""
+            local specNames = CLASS_SPECS[cls]
+            if not specNames then return end
+            -- Build a simple dropdown menu
+            if LichborneSpecMenu and LichborneSpecMenu:IsShown() then
+                LichborneSpecMenu:Hide()
+                return
+            end
+            if not LichborneSpecMenu then
+                LichborneSpecMenu = CreateFrame("Frame", "LichborneSpecMenu", UIParent)
+                LichborneSpecMenu:SetFrameStrata("TOOLTIP")
+                LichborneSpecMenu:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+                LichborneSpecMenu:SetBackdropColor(0.05, 0.07, 0.14, 0.98)
+                LichborneSpecMenu:SetBackdropBorderColor(0.78, 0.61, 0.23, 1)
+                LichborneSpecMenu.btns = {}
+                for s = 1, 3 do
+                    local mb = CreateFrame("Button", nil, LichborneSpecMenu)
+                    mb:SetSize(160, 22)
+                    mb:SetPoint("TOPLEFT", LichborneSpecMenu, "TOPLEFT", 4, -4 - (s-1)*23)
+                    local mbIcon = mb:CreateTexture(nil, "ARTWORK")
+                    mbIcon:SetSize(18, 18)
+                    mbIcon:SetPoint("LEFT", mb, "LEFT", 2, 0)
+                    mb.icon = mbIcon
+                    local mbLabel = mb:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                    mbLabel:SetPoint("LEFT", mb, "LEFT", 24, 0)
+                    mbLabel:SetTextColor(1, 1, 1)
+                    mb.label = mbLabel
+                    mb:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight", "ADD")
+                    LichborneSpecMenu.btns[s] = mb
+                end
+                LichborneSpecMenu:SetSize(168, 4 + 3*23)
+                LichborneSpecMenu:Hide()
+            end
+            -- Populate menu for this class
+            for s = 1, 3 do
+                local mb = LichborneSpecMenu.btns[s]
+                local sName = specNames[s] or ""
+                local sIcon = SPEC_ICONS[sName]
+                mb.icon:SetTexture(sIcon or "Interface\\Icons\\INV_Misc_QuestionMark")
+                mb.label:SetText(sName)
+                mb:SetScript("OnClick", function()
+                    rowData.spec = sName
+                    local icon = SPEC_ICONS[sName]
+                    if icon then
+                        row.specIcon:SetTexture(icon)
+                        row.specIcon:SetAlpha(1.0)
+                    end
+                    LichborneSpecMenu:Hide()
+                    if LichborneAddStatus then
+                        LichborneAddStatus:SetText("Set spec: |cffffff00"..sName.."|r for "..(rowData.name or "?"))
+                    end
+                end)
+            end
+            LichborneSpecMenu:ClearAllPoints()
+            LichborneSpecMenu:SetPoint("TOPLEFT", specBtn, "TOPRIGHT", 2, 0)
+            LichborneSpecMenu:Show()
+        end)
+
+        -- Name box
+        local nb = CreateFrame("EditBox", "LichborneRow"..i.."Name", row)
+        nb:SetPoint("LEFT", row, "LEFT", NAME_OFF, 0)
+        nb:SetSize(COL_NAME_W - 44, ROW_HEIGHT - 4)
+        nb:SetAutoFocus(false); nb:SetMaxLetters(32)
+        nb:SetFont("Fonts\\FRIZQT__.TTF", 11)
+        nb:SetTextColor(0.90, 0.95, 1.0)
+        nb:SetBackdrop({bgFile="Interface\\Tooltips\\UI-Tooltip-Background",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+        nb:SetBackdropColor(0.05, 0.07, 0.14, 0.8)
+        nb:SetBackdropBorderColor(0.15, 0.22, 0.38, 0.7)
+        nb:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
+        nb:SetScript("OnTabPressed", function(self) self:ClearFocus() end)
+        nb:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+        row.nameBox = nb
+        nb:SetScript("OnEnter", function() row.hov:SetTexture(0.78, 0.61, 0.23, 0.12) end)
+        nb:SetScript("OnLeave", function()
+            if GetMouseFocus() ~= row then row.hov:SetTexture(0, 0, 0, 0) end
+        end)
+
+        -- iLvl box
+        local gsb = CreateFrame("EditBox", "LichborneRow"..i.."GS", row)
+        gsb:SetPoint("LEFT", row, "LEFT", GS_OFF, 0)
+        gsb:SetSize(COL_GS_W - 2, ROW_HEIGHT - 4)
+        gsb:SetAutoFocus(false); gsb:SetMaxLetters(5)
+        gsb:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
+        gsb:SetTextColor(0.831, 0.686, 0.216); gsb:SetJustifyH("CENTER")
+        gsb:SetBackdrop({bgFile="Interface\\Tooltips\\UI-Tooltip-Background",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=1,right=1,top=1,bottom=1}})
+        gsb:SetBackdropColor(0.05, 0.07, 0.14, 1)
+        gsb:SetBackdropBorderColor(0.12, 0.18, 0.30, 0.8)
+        gsb:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
+        gsb:SetScript("OnTabPressed", function(self) self:ClearFocus() end)
+        gsb:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+        row.gsBox = gsb
+        gsb:SetScript("OnEnter", function() row.hov:SetTexture(0.78, 0.61, 0.23, 0.12) end)
+        gsb:SetScript("OnLeave", function()
+            if GetMouseFocus() ~= row then row.hov:SetTexture(0, 0, 0, 0) end
+        end)
+
+        -- GS box
+        local realGsb = CreateFrame("EditBox", "LichborneRow"..i.."RealGS", row)
+        realGsb:SetPoint("LEFT", row, "LEFT", REALGS_OFF, 0)
+        realGsb:SetSize(COL_GS_W - 2, ROW_HEIGHT - 4)
+        realGsb:SetAutoFocus(false); realGsb:SetMaxLetters(5)
+        realGsb:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
+        realGsb:SetTextColor(0.831, 0.686, 0.216); realGsb:SetJustifyH("CENTER")
+        realGsb:SetBackdrop({bgFile="Interface\\Tooltips\\UI-Tooltip-Background",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=1,right=1,top=1,bottom=1}})
+        realGsb:SetBackdropColor(0.05, 0.07, 0.14, 1)
+        realGsb:SetBackdropBorderColor(0.12, 0.18, 0.30, 0.8)
+        realGsb:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
+        realGsb:SetScript("OnTabPressed", function(self) self:ClearFocus() end)
+        realGsb:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+        row.realGsBox = realGsb
+        realGsb:SetScript("OnEnter", function() row.hov:SetTexture(0.78, 0.61, 0.23, 0.12) end)
+        realGsb:SetScript("OnLeave", function()
+            if GetMouseFocus() ~= row then row.hov:SetTexture(0, 0, 0, 0) end
+        end)
+
+        -- Gear boxes (ilvl)
+        row.gearBoxes = {}
+        for g = 1, GEAR_SLOTS do
+            local gx = GEAR_OFF + (g-1)*COL_GEAR_W
+            local gb = CreateFrame("EditBox", "LichborneRow"..i.."Gear"..g, row)
+            gb:SetPoint("LEFT", row, "LEFT", gx, 0)
+            gb:SetSize(COL_GEAR_W - 2, ROW_HEIGHT - 2)
+            gb:SetAutoFocus(false); gb:SetMaxLetters(3); gb:SetNumeric(true)
+            gb:SetFont("Fonts\\FRIZQT__.TTF", 9, "OUTLINE")
+            gb:SetTextColor(1,1,1); gb:SetJustifyH("CENTER")
+            gb:SetBackdrop({bgFile="Interface\\Tooltips\\UI-Tooltip-Background",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=1,right=1,top=1,bottom=1}})
+            gb:SetBackdropColor(0.05, 0.07, 0.14, 1)
+            gb:SetBackdropBorderColor(0.12, 0.18, 0.30, 0.8)
+            gb:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
+            gb:SetScript("OnTabPressed", function(self) self:ClearFocus() end)
+            gb:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+            gb:SetScript("OnMouseUp", function(_, mouseButton)
+                if mouseButton == "RightButton" then
+                    gb:SetText("")
+                    gb:SetTextColor(1, 1, 1)
+                    if row.dbIndex then
+                        LichborneTrackerDB.rows[row.dbIndex].ilvl[g] = 0
+                        if LichborneTrackerDB.rows[row.dbIndex].ilvlLink then
+                            LichborneTrackerDB.rows[row.dbIndex].ilvlLink[g] = ""
+                        end
+                    end
+                end
+            end)
+            row.gearBoxes[g] = gb
+            -- Hover glow overlay frame
+            local glow = CreateFrame("Frame", nil, row)
+            glow:SetAllPoints(gb)
+            glow:SetFrameLevel(gb:GetFrameLevel() + 1)
+            glow:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=8,edgeSize=6,insets={left=1,right=1,top=1,bottom=1}})
+            glow:SetBackdropColor(0,0,0,0)
+            glow:SetBackdropBorderColor(0,0,0,0)
+            glow:EnableMouse(false)
+            gb:SetScript("OnEnter", function()
+                row.hov:SetTexture(0.78, 0.61, 0.23, 0.12)
+                glow:SetBackdropBorderColor(0.3, 0.7, 1.0, 1.0)
+                glow:SetBackdropColor(0.05, 0.15, 0.35, 0.4)
+            end)
+            gb:SetScript("OnLeave", function()
+                local f = GetMouseFocus()
+                if f ~= row then row.hov:SetTexture(0, 0, 0, 0) end
+                glow:SetBackdropBorderColor(0, 0, 0, 0)
+                glow:SetBackdropColor(0, 0, 0, 0)
+            end)
+        end
+
+        -- Add to Raid button (green +)
+        local addRaidX = GEAR_OFF + GEAR_SLOTS * COL_GEAR_W + 3
+        local arb = CreateFrame("Button", "LichborneRow"..i.."AddRaid", row)
+        arb:SetPoint("RIGHT", row, "RIGHT", -36, 0)
+        arb:SetSize(16, ROW_HEIGHT - 2)
+        arb:SetNormalFontObject("GameFontNormalSmall")
+        arb:SetText("|cff44ff44+|r")
+        arb:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight", "ADD")
+        arb:SetScript("OnEnter", function()
+            GameTooltip:SetOwner(arb, "ANCHOR_RIGHT")
+            GameTooltip:AddLine("|cff44ff44+ Add to Raid|r", 1, 1, 1)
+            GameTooltip:AddLine("Adds to the Raid planner tab.", 0.7, 0.7, 0.7)
+            GameTooltip:Show()
+        end)
+        arb:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        row.addRaidBtn = arb
+
+        -- Add to Group button (cyan >) - invite to current party
+        local agX = addRaidX + 20
+        local agb = CreateFrame("Button", "LichborneRow"..i.."AddGroup", row)
+        agb:SetPoint("RIGHT", row, "RIGHT", -20, 0)
+        agb:SetSize(16, ROW_HEIGHT - 2)
+        agb:SetNormalFontObject("GameFontNormalSmall")
+        agb:SetText("|cff44eeff>|r")
+        agb:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight", "ADD")
+        agb:SetScript("OnEnter", function()
+            GameTooltip:SetOwner(agb, "ANCHOR_RIGHT")
+            GameTooltip:AddLine("|cff44eeff> Invite to Group|r", 1, 1, 1)
+            GameTooltip:AddLine("Sends a party invite to this player.", 0.7, 0.7, 0.7)
+            GameTooltip:Show()
+        end)
+        agb:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        row.addGroupBtn = agb
+
+        -- Delete button (shifted right)
+        local delX = agX + 20
+        local db = CreateFrame("Button", "LichborneRow"..i.."Del", row)
+        db:SetPoint("RIGHT", row, "RIGHT", -2, 0)
+        db:SetSize(18, ROW_HEIGHT - 2)
+        db:SetNormalFontObject("GameFontNormalSmall")
+        db:SetText("|cffaa2222x|r")
+        db:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight", "ADD")
+        db:SetScript("OnEnter", function()
+            GameTooltip:SetOwner(db, "ANCHOR_RIGHT")
+            GameTooltip:AddLine("Remove Character", 1, 0.3, 0.3)
+            GameTooltip:AddLine("Permanently removes this character", 0.8, 0.8, 0.8)
+            GameTooltip:AddLine("from the tracker database.", 0.8, 0.8, 0.8)
+            GameTooltip:Show()
+        end)
+        db:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        row.delBtn = db
+
+        -- Needs cell in class tab (beside GS, before gear slots)
+        local classRow = row
+        row.needsCell = MakeNeedsCell(row, NEEDS_OFF, ROW_HEIGHT, function()
+            if classRow.dbIndex and LichborneTrackerDB.rows[classRow.dbIndex] then
+                return LichborneTrackerDB.rows[classRow.dbIndex].name or ""
+            end
+            return ""
+        end, row.hov, COL_NEEDS_W)
+
+        -- Hook all child elements to propagate row highlight
+        local hov = row.hov
+        HookRowHighlight(dragBtn, row, hov)
+        HookRowHighlight(specBtn, row, hov)
+        HookRowHighlight(arb, row, hov)
+        HookRowHighlight(agb, row, hov)
+        HookRowHighlight(db, row, hov)
+
+        -- Divider
+        local line = row:CreateTexture(nil, "OVERLAY")
+        line:SetHeight(1); line:SetWidth(1010)
+        line:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 0, 0)
+        line:SetTexture(0.12, 0.20, 0.35, 0.4)
+
+        rowFrames[i] = row
+    end
+end
+
+-- ── Populate rows with current class data ────────────────────
+local function RefreshRows()
+    if activeTab == "Raid" then
+        if LichborneRaidFrame then RefreshRaidRows() end
+        return
+    end
+    if activeTab == "All" then
+        if LichborneAllFrame then RefreshAllRows() end
+        return
+    end
+    EnsureClass(activeTab)
+    local indices = GetClassRows(activeTab)
+    local c = CLASS_COLORS[activeTab]
+
+    -- Reset to page 1 if tab changed
+    if not classPage[activeTab] then classPage[activeTab] = 1 end
+    -- Update page dropdown label
+    local page = classPage[activeTab] or 1
+    if LichbornePageLbl then LichbornePageLbl:SetText("|cffd4af37Page "..page.." v|r") end
+    if LichbornePagePrev then LichbornePagePrev:SetAlpha(page > 1 and 1.0 or 0.35) end
+    if LichbornePageNext then LichbornePageNext:SetAlpha(page < MAX_PAGES and 1.0 or 0.35) end
+
+
+    for i = 1, MAX_ROWS do
+        local row = rowFrames[i]
+        if not row then break end
+        local di = indices[i]
+
+        if di then
+            local data = LichborneTrackerDB.rows[di]
+            row.dbIndex = di
+            if row.dragLbl then
+                row.dragLbl:SetText(tostring(i))
+                row.dragLbl:SetTextColor(0.4, 0.4, 0.5, 1.0)
+            end
+            row:Show()
+
+            -- No background tint - clean dark rows
+            row.bg:SetTexture(0.05, 0.07, 0.13, 1)
+            -- Name box colored text to match class
+            if c then
+                row.nameBox:SetTextColor(c.r, c.g, c.b)
+            else
+                row.nameBox:SetTextColor(0.90, 0.95, 1.0)
+            end
+            row.nameBox:SetBackdropColor(0.05, 0.07, 0.14, 0.8)
+            row.nameBox:SetBackdropBorderColor(0.15, 0.22, 0.38, 0.7)
+
+            -- Spec icon
+            if row.specIcon then
+                local spec = data.spec or ""
+                local icon = spec ~= "" and SPEC_ICONS[spec] or nil
+                if icon then
+                    row.specIcon:SetTexture(icon)
+                    row.specIcon:SetAlpha(1.0)
+                else
+                    row.specIcon:SetTexture("Interface\\Icons\\INV_Misc_QuestionMark")
+                    row.specIcon:SetAlpha(data.name and data.name ~= "" and 0.25 or 0)
+                end
+            end
+
+            -- Name
+            row.nameBox:SetText(data.name or "")
+            row.nameBox:SetScript("OnTextChanged", function()
+                LichborneTrackerDB.rows[di].name = row.nameBox:GetText()
+            end)
+
+            -- iLvl
+            local gsval = data.gs or 0
+            row.gsBox:SetScript("OnTextChanged", nil)
+            row.gsBox:SetText(gsval > 0 and tostring(gsval) or "")
+            row.gsBox:SetScript("OnTextChanged", function()
+                local raw = row.gsBox:GetText()
+                local clean = raw:gsub("%D", "")
+                if clean ~= raw then
+                    row.gsBox:SetText(clean)
+                    return
+                end
+                LichborneTrackerDB.rows[di].gs = tonumber(clean) or 0
+            end)
+
+            -- GS
+            local realGsVal = data.realGs or 0
+            row.realGsBox:SetScript("OnTextChanged", nil)
+            row.realGsBox:SetText(realGsVal > 0 and tostring(realGsVal) or "")
+            row.realGsBox:SetScript("OnTextChanged", function()
+                local raw = row.realGsBox:GetText()
+                local clean = raw:gsub("%D", "")
+                if clean ~= raw then
+                    row.realGsBox:SetText(clean)
+                    return
+                end
+                LichborneTrackerDB.rows[di].realGs = tonumber(clean) or 0
+            end)
+
+            -- Gear (ilvl)
+            for g = 1, GEAR_SLOTS do
+                local gb = row.gearBoxes[g]
+                local val = data.ilvl[g] or 0
+                gb:SetText(val > 0 and tostring(val) or "")
+                -- Apply item quality color to the ilvl text
+                local link = data.ilvlLink and data.ilvlLink[g]
+                local qc = GetItemQualityColor(link)
+                if qc then
+                    gb:SetTextColor(qc.r, qc.g, qc.b)
+                else
+                    gb:SetTextColor(1, 1, 1)
+                end
+                gb:SetScript("OnTextChanged", function()
+                    local n = tonumber(gb:GetText()) or 0
+                    if n > 999 then n=999; gb:SetText("999") end
+                    if n < 0   then n=0;   gb:SetText("") end
+                    LichborneTrackerDB.rows[di].ilvl[g] = n
+                end)
+                gb:SetScript("OnEnter", function()
+                    row.hov:SetTexture(0.78, 0.61, 0.23, 0.12)
+                    local rowData = LichborneTrackerDB.rows[di]
+                    local link = rowData and rowData.ilvlLink and rowData.ilvlLink[g]
+                    if link and link ~= "" then
+                        local anchor = (i <= 11) and "ANCHOR_BOTTOM" or "ANCHOR_TOP"
+                        GameTooltip:SetOwner(gb, anchor)
+                        GameTooltip:SetHyperlink(link)
+                        GameTooltip:Show()
+                    end
+                end)
+                gb:SetScript("OnLeave", function()
+                    if GetMouseFocus() ~= row then row.hov:SetTexture(0, 0, 0, 0) end
+                    GameTooltip:Hide()
+                end)
+            end
+
+            -- Add to Raid
+            if row.addRaidBtn then
+                row.addRaidBtn:SetScript("OnClick", function()
+                    local srcData = LichborneTrackerDB.rows[di]
+                    if not srcData or not srcData.name or srcData.name == "" then return end
+                    -- Get current raid roster
+                    local roster, maxSlots = GetCurrentRoster()
+                    -- Check for duplicate
+                    for ri = 1, maxSlots do
+                        local rr = roster[ri]
+                        if rr.name and rr.name:lower() == srcData.name:lower() then
+                            local c2 = CLASS_COLORS[srcData.cls]
+                            local hex2 = c2 and string.format("|cff%02x%02x%02x", math.floor(c2.r*255), math.floor(c2.g*255), math.floor(c2.b*255)) or "|cffffffff"
+                            if LichborneAddStatus then
+                                LichborneAddStatus:SetText(hex2..srcData.name.."|r is already in the Raid.")
+                            end
+                            DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r "..hex2..srcData.name.."|r is already in the Raid.", 1, 0.5, 0.5)
+                            return
+                        end
+                    end
+                    -- Find first empty raid slot within size limit
+                    local slot = nil
+                    for ri = 1, maxSlots do
+                        local rr = roster[ri]
+                        if not rr.name or rr.name == "" then
+                            slot = ri; break
+                        end
+                    end
+                    if not slot then
+                        local raidLabel = LichborneTrackerDB.raidName or "Raid"
+                        DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r "..raidLabel.." is full ("..maxSlots.."/"..maxSlots..").", 1, 0.5, 0.5)
+                        return
+                    end
+                    roster[slot] = {
+                        name = srcData.name,
+                        cls  = srcData.cls,
+                        spec = srcData.spec or "",
+                        gs   = srcData.gs or 0,
+                        realGs = srcData.realGs or 0,
+                    }
+                    local c = CLASS_COLORS[srcData.cls]
+                    local hex = c and string.format("|cff%02x%02x%02x", math.floor(c.r*255), math.floor(c.g*255), math.floor(c.b*255)) or "|cffffffff"
+                    DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Added "..hex..srcData.name.."|r to Raid slot "..slot..".", 1, 0.85, 0)
+                    if LichborneAddStatus then
+                        LichborneAddStatus:SetText(hex..srcData.name.."|r added to raid slot "..slot..".")
+                    end
+                    -- Refresh raid rows if visible
+                    if activeTab == "Raid" and raidRowFrames and #raidRowFrames > 0 then
+                        RefreshRaidRows()
+                    end
+                end)
+            end
+
+            -- Invite to Group
+            if row.addGroupBtn then
+                row.addGroupBtn:SetScript("OnClick", function()
+                    local srcData = LichborneTrackerDB.rows[di]
+                    if not srcData or not srcData.name or srcData.name == "" then return end
+                    SendChatMessage(".playerbots bot add "..srcData.name, "SAY")
+                    local c = CLASS_COLORS[srcData.cls]
+                    local hex = c and string.format("|cff%02x%02x%02x", math.floor(c.r*255), math.floor(c.g*255), math.floor(c.b*255)) or "|cffffffff"
+                    DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Inviting "..hex..srcData.name.."|r to group...", 1, 0.85, 0)
+                    if LichborneAddStatus then
+                        LichborneAddStatus:SetText("Invited "..hex..srcData.name.."|r to group.")
+                    end
+                end)
+            end
+
+            -- Delete
+            row.delBtn:SetScript("OnClick", function()
+                local srcData = LichborneTrackerDB.rows[di]
+                if not srcData then return end
+                if srcData.name and srcData.name ~= "" then
+                    RemoveCharacterReferences(srcData.name)
+                else
+                    LichborneTrackerDB.rows[di] = DefaultRow(srcData.cls)
+                end
+                RefreshRows()
+                if allRowFrames and #allRowFrames > 0 then RefreshAllRows() end
+                if raidRowFrames and #raidRowFrames > 0 then RefreshRaidRows() end
+            end)
+
+            -- Needs cell
+            if row.needsCell then
+                RefreshNeedsCell(row.needsCell, data.name or "")
+            end
+        else
+            if row.needsCell then RefreshNeedsCell(row.needsCell, "") end
+            row:Hide()
+        end
+    end
+    UpdateSummary()
+end
+
+-- ── One-time UI setup ─────────────────────────────────────────
+
+local SORT_GOLD  = "|cffd4af37"   -- gold used for sort button label
+local SORT_OPTS  = {
+    { label = "By Name",       mode = "name"     },
+    { label = "By Class/Spec", mode = "classspec"},
+    { label = "By Gear Score", mode = "gs"       },
+}
+
+-- Builds a Sort dropdown button+menu parented to `parent`.
+-- onSelect(mode) called when user picks an option.
+-- Returns the button so caller can position it.
+local function MakeSortDropdown(parent, fl, onSelect)
+    local btn = CreateFrame("Button", nil, parent)
+    btn:SetSize(90, 16); btn:SetFrameLevel(fl+2)
+    btn:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=8,edgeSize=6,insets={left=1,right=1,top=1,bottom=1}})
+    btn:SetBackdropColor(0.10,0.08,0.02,1); btn:SetBackdropBorderColor(0.70,0.55,0.10,0.9)
+    btn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+    local lbl = btn:CreateFontString(nil,"OVERLAY","GameFontNormalSmall")
+    lbl:SetAllPoints(btn); lbl:SetJustifyH("CENTER"); lbl:SetJustifyV("MIDDLE")
+    lbl:SetText(SORT_GOLD.."Sort  v|r")
+
+    local menu = CreateFrame("Frame", nil, UIParent)
+    menu:SetFrameStrata("TOOLTIP"); menu:SetSize(150, #SORT_OPTS*22+8)
+    menu:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+    menu:SetBackdropColor(0.08,0.06,0.01,0.98); menu:SetBackdropBorderColor(0.70,0.55,0.10,1)
+    menu:Hide()
+
+    for i, opt in ipairs(SORT_OPTS) do
+        local mb = CreateFrame("Button", nil, menu); mb:SetSize(146, 20)
+        mb:SetPoint("TOPLEFT", menu, "TOPLEFT", 2, -2-(i-1)*22)
+        mb:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=1,right=1,top=1,bottom=1}})
+        mb:SetBackdropColor(0.08,0.06,0.01,1); mb:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+        local ml = mb:CreateFontString(nil,"OVERLAY","GameFontNormalSmall"); ml:SetAllPoints(mb); ml:SetJustifyH("CENTER")
+        ml:SetText(SORT_GOLD..opt.label.."|r")
+        local cap = opt
+        mb:SetScript("OnClick", function()
+            menu:Hide()
+            lbl:SetText(SORT_GOLD..cap.label.."  v|r")
+            onSelect(cap.mode)
+        end)
+    end
+
+    allSortMenus[#allSortMenus+1] = menu  -- track for tab-switch hiding
+
+    btn:SetScript("OnClick", function()
+        if menu:IsShown() then menu:Hide()
+        else
+            CloseAllSortMenus()
+            if _G["LichbornePageDDMenu"] then _G["LichbornePageDDMenu"]:Hide() end
+            menu:ClearAllPoints()
+            menu:SetPoint("TOPLEFT", btn, "BOTTOMLEFT", 0, -2)
+            menu:Show()
+        end
+    end)
+
+    btn._menu = menu  -- store ref so callers can hide on tab switch
+    return btn
+end
+
+
+local function GetClassAvgIlvl(cls)
+    if cls == "Raid" then return 0 end
+    local total, namedRows = 0, 0
+    for _, row in ipairs(LichborneTrackerDB.rows) do
+        if row.cls == cls and row.name and row.name ~= "" then
+            namedRows = namedRows + 1
+            total = total + (row.gs or 0)  -- row.gs stores the iLvl column value
+        end
+    end
+    if namedRows == 0 then return 0 end
+    return math.floor(total / namedRows + 0.5)
+end
+
+local function GetClassAvgGS(cls)
+    if cls == "Raid" then return 0 end
+    local total, namedRows = 0, 0
+    for _, row in ipairs(LichborneTrackerDB.rows) do
+        if row.cls == cls and row.name and row.name ~= "" then
+            namedRows = namedRows + 1
+            total = total + (row.realGs or 0)  -- row.realGs stores actual GS (1000s)
+        end
+    end
+    if namedRows == 0 then return 0 end
+    return math.floor(total / namedRows + 0.5)
+end
+
+local function GetRosterAvgIlvl()
+    local total, namedRows = 0, 0
+    for _, row in ipairs(LichborneTrackerDB.rows) do
+        if row.name and row.name ~= "" then
+            namedRows = namedRows + 1
+            total = total + (row.gs or 0)  -- row.gs stores the iLvl column value
+        end
+    end
+    if namedRows == 0 then return 0 end
+    return math.floor(total / namedRows + 0.5)
+end
+
+local function GetRosterAvgGS()
+    local total, namedRows = 0, 0
+    for _, row in ipairs(LichborneTrackerDB.rows) do
+        if row.name and row.name ~= "" then
+            namedRows = namedRows + 1
+            total = total + (row.realGs or 0)  -- row.realGs stores actual GS (1000s)
+        end
+    end
+    if namedRows == 0 then return 0 end
+    return math.floor(total / namedRows + 0.5)
+end
+
+
+
+-- ── Needs picker & cell builder ───────────────────────────────
+-- ── Raid tab: BuildRaidFrame ───────────────────────────────────
+local function BuildRaidFrame(parent, fl)
+    if raidFrameBuilt then return end
+    raidFrameBuilt = true
+
+    -- Main container hidden behind header bar area
+    LichborneRaidFrame = CreateFrame("Frame", "LichborneRaidFrame", parent)
+    LichborneRaidFrame:SetPoint("TOPLEFT", parent, "TOPLEFT", 20, -94)
+    LichborneRaidFrame:SetSize(1070, 510)
+    LichborneRaidFrame:SetFrameLevel(fl + 10)
+    LichborneRaidFrame:Hide()
+    -- Full frame background so no gaps show between columns
+    local raidFrameBg = LichborneRaidFrame:CreateTexture(nil, "BACKGROUND")
+    raidFrameBg:SetAllPoints(LichborneRaidFrame)
+    raidFrameBg:SetTexture(0.05, 0.07, 0.13, 1)
+
+
+    -- Tier bar across top with dropdown
+    -- Raid definitions: tier -> list of {name, size}
+    local RAID_DEFS = {
+        [0]  = {{"N/A (5-Man)",5}},
+        [1]  = {{"Molten Core",40},{"Onyxia's Lair",40}},
+        [2]  = {{"Blackwing Lair",40}},
+        [3]  = {{"Zul'Gurub",20},{"Ruins of Ahn'Qiraj",20}},
+        [4]  = {{"Ahn'Qiraj (AQ40)",40}},
+        [5]  = {{"Ahn'Qiraj (AQ20)",20}},
+        [6]  = {{"Naxxramas (Classic)",40}},
+        [7]  = {{"Karazhan",10},{"Gruul's Lair",25},{"Magtheridon's Lair",25}},
+        [8]  = {{"Karazhan",10},{"Gruul's Lair",25},{"Magtheridon's Lair",25}},
+        [9]  = {{"Serpentshrine Cavern",25},{"Tempest Keep",25}},
+        [10] = {{"Mount Hyjal",25},{"Black Temple",25}},
+        [11] = {{"Zul'Aman",10}},
+        [12] = {{"Sunwell Plateau",25}},
+        [13] = {{"Naxxramas 10",10},{"Naxxramas 25",25},{"Eye of Eternity 10",10},{"Eye of Eternity 25",25},{"Obsidian Sanctum 10",10},{"Obsidian Sanctum 25",25}},
+        [14] = {{"Ulduar 10",10},{"Ulduar 25",25}},
+        [15] = {{"Trial of the Crusader 10",10},{"Trial of the Crusader 25",25},{"Trial of the Grand Crusader 10",10},{"Trial of the Grand Crusader 25",25}},
+        [16] = {{"Icecrown Citadel 10",10},{"Icecrown Citadel 25",25},{"ICC 10 Heroic",10},{"ICC 25 Heroic",25}},
+        [17] = {{"Ruby Sanctum 10",10},{"Ruby Sanctum 25",25}},
+    }
+
+    -- Init raid selection state
+    if not LichborneTrackerDB.raidName then LichborneTrackerDB.raidName = "N/A (5-Man)" end
+    if not LichborneTrackerDB.raidSize then LichborneTrackerDB.raidSize = 5 end
+
+    local tierBar = CreateFrame("Frame", nil, LichborneRaidFrame)
+    tierBar:SetPoint("TOPLEFT", LichborneRaidFrame, "TOPLEFT", 0, 0)
+    tierBar:SetSize(1080, 24)
+    tierBar:SetFrameLevel(fl + 11)
+    local tierBarBg = tierBar:CreateTexture(nil, "BACKGROUND")
+    tierBarBg:SetAllPoints(tierBar)
+
+    local function UpdateTierBar()
+        local t = LichborneTrackerDB.raidTier or 0
+        local colorKey = (t == 0) and 18 or t
+        local c = TIER_COLORS[colorKey]
+        if c then tierBarBg:SetTexture(c.r*0.6, c.g*0.6, c.b*0.6, 1) end
+    end
+    UpdateTierBar()
+
+    -- Helper to make a dropdown button
+    local function MakeDD(name, w, parent)
+        local btn = CreateFrame("Button", name, parent or tierBar)
+        btn:SetSize(w, 20)
+        btn:SetFrameLevel(fl + 12)
+        btn:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+        btn:SetBackdropColor(0.05,0.07,0.14,1)
+        btn:SetBackdropBorderColor(0.78,0.61,0.23,0.8)
+        local lbl = btn:CreateFontString(nil,"OVERLAY","GameFontNormalSmall")
+        lbl:SetAllPoints(btn); lbl:SetJustifyH("CENTER")
+        btn.lbl = lbl
+        return btn
+    end
+
+    -- ── Tier label + dropdown ──────────────────────────────────
+    local tierLbl = tierBar:CreateFontString(nil,"OVERLAY","GameFontNormal")
+    tierLbl:SetPoint("LEFT",tierBar,"LEFT",100,0)
+    tierLbl:SetText("|cffC69B3ATier:|r")
+
+    local tierDD = MakeDD("LichborneRaidTierDrop", 200)
+    tierDD:SetPoint("LEFT",tierLbl,"RIGHT",6,0)
+
+    local raidDD = MakeDD("LichborneRaidRaidDrop", 220)
+    local raidDDMenu  -- forward ref
+
+    local function UpdateRaidDD(hex)
+        local t = LichborneTrackerDB.raidTier or 1
+        local defs = RAID_DEFS[t] or {}
+        -- Find current raid in this tier, fallback to first
+        local found = false
+        for _, rd in ipairs(defs) do
+            if rd[1] == LichborneTrackerDB.raidName then found = true; break end
+        end
+        if not found and #defs > 0 then
+            LichborneTrackerDB.raidName = defs[1][1]
+            LichborneTrackerDB.raidSize = defs[1][2]
+        end
+        local raidName = LichborneTrackerDB.raidName or "---"
+        local raidSize = LichborneTrackerDB.raidSize or 40
+        local h = hex or "|cffd4af37"
+        raidDD.lbl:SetText(h..raidName.."|r  |cffaaaaaa("..raidSize..")|r  v")
+    end
+
+    local function UpdateTierDD()
+        local t = LichborneTrackerDB.raidTier or 1
+        local colorKey = (t == 0) and 18 or t
+        local c = TIER_COLORS[colorKey]
+        local hex = c and string.format("|cff%02x%02x%02x",math.floor(c.r*255),math.floor(c.g*255),math.floor(c.b*255)) or "|cffffffff"
+        local label = (TIER_LABELS[t] or ""):match("^T%d+ %— (.+)") or ""
+        tierDD.lbl:SetText(hex.."T"..t.."  "..label.."  v|r")
+        UpdateTierBar()
+        UpdateRaidDD(hex)
+    end
+    UpdateTierDD()
+
+    -- Raid label
+    local raidLbl = tierBar:CreateFontString(nil,"OVERLAY","GameFontNormal")
+    raidLbl:SetPoint("LEFT",tierDD,"RIGHT",14,0)
+    raidLbl:SetText("|cffC69B3ARaid:|r")
+    raidDD:SetPoint("LEFT",raidLbl,"RIGHT",6,0)
+
+    -- Tier dropdown menu
+    local tierDDMenu = CreateFrame("Frame","LichborneRaidTierMenu",UIParent)
+    tierDDMenu:SetFrameStrata("TOOLTIP")
+    tierDDMenu:SetSize(260, 18*22+8)
+    tierDDMenu:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+    tierDDMenu:SetBackdropColor(0.04,0.06,0.12,0.98)
+    tierDDMenu:SetBackdropBorderColor(0.78,0.61,0.23,1)
+    tierDDMenu:Hide()
+    for t=0,17 do
+        local mb = CreateFrame("Button",nil,tierDDMenu)
+        mb:SetSize(256,20); mb:SetPoint("TOPLEFT",tierDDMenu,"TOPLEFT",2,-2-(t)*22)
+        local mbbg=mb:CreateTexture(nil,"BACKGROUND"); mbbg:SetAllPoints(mb)
+        local colorKey2 = (t == 0) and 18 or t
+        local c=TIER_COLORS[colorKey2]; if not c then c={r=0.1,g=0.1,b=0.1} end
+        mbbg:SetTexture(c.r*0.35,c.g*0.35,c.b*0.35,1)
+        mb:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+        local mblbl=mb:CreateFontString(nil,"OVERLAY","GameFontNormalSmall"); mblbl:SetAllPoints(mb); mblbl:SetJustifyH("CENTER")
+        local hex=string.format("|cff%02x%02x%02x",math.floor(c.r*255),math.floor(c.g*255),math.floor(c.b*255))
+        mblbl:SetText(hex..(TIER_LABELS[t] or ("T"..t)).."|r")
+        mb:SetScript("OnClick",function()
+            LichborneTrackerDB.raidTier = t
+            UpdateTierDD()
+            tierDDMenu:Hide()
+            if raidRowFrames and #raidRowFrames > 0 then RefreshRaidRows() end
+            UpdateInviteButtons()
+        end)
+    end
+    tierDD:SetScript("OnClick",function()
+        if raidDDMenu then raidDDMenu:Hide() end
+        if tierDDMenu:IsShown() then tierDDMenu:Hide()
+        else tierDDMenu:ClearAllPoints(); tierDDMenu:SetPoint("TOPLEFT",tierDD,"BOTTOMLEFT",0,-2); tierDDMenu:Show() end
+    end)
+
+    local groupDDMenu
+
+    -- Raid dropdown menu (built dynamically per tier)
+    raidDDMenu = CreateFrame("Frame","LichborneRaidRaidMenu",UIParent)
+    raidDDMenu:SetFrameStrata("TOOLTIP")
+    raidDDMenu:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+    raidDDMenu:SetBackdropColor(0.04,0.06,0.12,0.98)
+    raidDDMenu:SetBackdropBorderColor(0.78,0.61,0.23,1)
+    raidDDMenu:Hide()
+    raidDDMenu.btns = {}
+
+    local function PopulateRaidMenu()
+        -- Hide old buttons
+        for _,b in ipairs(raidDDMenu.btns) do b:Hide() end
+        raidDDMenu.btns = {}
+        local t = LichborneTrackerDB.raidTier or 1
+        local defs = RAID_DEFS[t] or {}
+        for idx, rd in ipairs(defs) do
+            local mb = CreateFrame("Button",nil,raidDDMenu)
+            mb:SetSize(256,20); mb:SetPoint("TOPLEFT",raidDDMenu,"TOPLEFT",2,-2-(idx-1)*22)
+            local mbbg=mb:CreateTexture(nil,"BACKGROUND"); mbbg:SetAllPoints(mb)
+            local ck=TIER_COLORS[(t==0) and 18 or t] or TIER_COLORS[1]; local c=ck; mbbg:SetTexture(c.r*0.25,c.g*0.25,c.b*0.25,1)
+            mb:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+            local mblbl=mb:CreateFontString(nil,"OVERLAY","GameFontNormalSmall"); mblbl:SetAllPoints(mb); mblbl:SetJustifyH("CENTER")
+            mblbl:SetText("|cffffffff"..rd[1].."|r  |cffaaaaaa("..rd[2].." players)|r")
+            local capturedName = rd[1]
+            local capturedSize = rd[2]
+            mb:SetScript("OnClick",function()
+                LichborneTrackerDB.raidName = capturedName
+                LichborneTrackerDB.raidSize = capturedSize
+                LichborneTrackerDB.raidGroup = "A"  -- always start on group A for a new raid
+                -- Update group dropdown label to show A
+                local gdd = _G["LichborneRaidGroupDrop"]
+                if gdd and gdd.lbl then gdd.lbl:SetText("|cffd4af37 A|r  v") end
+                UpdateRaidDD()
+                raidDDMenu:Hide()
+                if raidRowFrames and #raidRowFrames > 0 then RefreshRaidRows() end
+            end)
+            raidDDMenu.btns[idx] = mb
+        end
+        raidDDMenu:SetSize(260, #defs*22+8)
+    end
+
+    raidDD:SetScript("OnClick",function()
+        tierDDMenu:Hide()
+        if groupDDMenu then groupDDMenu:Hide() end
+        PopulateRaidMenu()
+        if raidDDMenu:IsShown() then raidDDMenu:Hide()
+        else raidDDMenu:ClearAllPoints(); raidDDMenu:SetPoint("TOPLEFT",raidDD,"BOTTOMLEFT",0,-2); raidDDMenu:Show() end
+    end)
+    UpdateRaidDD()
+
+    -- ── Group dropdown (A / B / C) ─────────────────────────
+    local groupLbl = tierBar:CreateFontString(nil,"OVERLAY","GameFontNormal")
+    groupLbl:SetPoint("LEFT",raidDD,"RIGHT",14,0)
+    groupLbl:SetText("|cffC69B3AGroup:|r")
+
+    local groupDD = MakeDD("LichborneRaidGroupDrop", 70)
+    groupDD:SetPoint("LEFT",groupLbl,"RIGHT",6,0)
+    groupDD:SetFrameLevel(fl + 12)
+
+    local function UpdateGroupDD()
+        local g = LichborneTrackerDB.raidGroup or "A"
+        groupDD.lbl:SetText("|cffd4af37"..g.."|r  v")
+    end
+    UpdateGroupDD()
+
+    groupDDMenu = CreateFrame("Frame","LichborneRaidGroupMenu",UIParent)
+    groupDDMenu:SetFrameStrata("TOOLTIP")
+    groupDDMenu:SetSize(74, 3*22+8)
+    groupDDMenu:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+    groupDDMenu:SetBackdropColor(0.04,0.06,0.12,0.98)
+    groupDDMenu:SetBackdropBorderColor(0.78,0.61,0.23,1)
+    groupDDMenu:Hide()
+    for gi, gname in ipairs({"A","B","C"}) do
+        local mb = CreateFrame("Button",nil,groupDDMenu)
+        mb:SetSize(70,20); mb:SetPoint("TOPLEFT",groupDDMenu,"TOPLEFT",2,-2-(gi-1)*22)
+        mb:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=1,right=1,top=1,bottom=1}})
+        mb:SetBackdropColor(0.06,0.09,0.20,1)
+        mb:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+        local mblbl=mb:CreateFontString(nil,"OVERLAY","GameFontNormal"); mblbl:SetAllPoints(mb); mblbl:SetJustifyH("CENTER")
+        mblbl:SetText("|cffffffff"..gname.."|r")
+        local capturedG = gname
+        mb:SetScript("OnClick",function()
+            LichborneTrackerDB.raidGroup = capturedG
+            UpdateGroupDD()
+            groupDDMenu:Hide()
+            if raidRowFrames and #raidRowFrames > 0 then RefreshRaidRows() end
+        end)
+    end
+    groupDD:SetScript("OnClick",function()
+        tierDDMenu:Hide(); raidDDMenu:Hide()
+        if groupDDMenu:IsShown() then groupDDMenu:Hide()
+        else groupDDMenu:ClearAllPoints(); groupDDMenu:SetPoint("TOPLEFT",groupDD,"BOTTOMLEFT",0,-2); groupDDMenu:Show() end
+    end)
+
+    -- Sort dropdown
+    local raidSortBtn = MakeSortDropdown(tierBar, fl + 12, function(mode)
+        raidSortMode = mode
+        RefreshRaidRows()
+    end)
+    raidSortBtn:SetPoint("LEFT", tierBar, "LEFT", 4, 0)
+
+    -- ── Copy / Paste roster buttons ────────────────────────────
+    local rosterClipboard = nil       -- session-only clipboard
+    local clipboardLabel  = nil       -- human-readable source label e.g. "T1 Molten Core (A)"
+
+    local copyBtn = CreateFrame("Button", nil, tierBar)
+    copyBtn:SetSize(55, 20); copyBtn:SetFrameLevel(fl + 12)
+    copyBtn:SetPoint("RIGHT", tierBar, "RIGHT", -70, 0)
+    copyBtn:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+    copyBtn:SetBackdropColor(0.10,0.08,0.02,1); copyBtn:SetBackdropBorderColor(0.78,0.61,0.23,0.9)
+    copyBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+    local copyLbl = copyBtn:CreateFontString(nil,"OVERLAY","GameFontNormalSmall")
+    copyLbl:SetAllPoints(copyBtn); copyLbl:SetJustifyH("CENTER"); copyLbl:SetJustifyV("MIDDLE")
+    copyLbl:SetText("|cffd4af37Copy|r")
+    copyBtn:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(copyBtn,"ANCHOR_BOTTOM")
+        GameTooltip:AddLine("Copy Roster",1,1,1)
+        GameTooltip:AddLine("Copies the current roster to clipboard.",0.8,0.8,0.8)
+        GameTooltip:Show()
+    end)
+    copyBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    local pasteBtn = CreateFrame("Button", nil, tierBar)
+    pasteBtn:SetSize(55, 20); pasteBtn:SetFrameLevel(fl + 12)
+    pasteBtn:SetPoint("RIGHT", copyBtn, "LEFT", -4, 0)
+    pasteBtn:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+    pasteBtn:SetBackdropColor(0.10,0.08,0.02,1); pasteBtn:SetBackdropBorderColor(0.78,0.61,0.23,0.9)
+    pasteBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+    local pasteLbl = pasteBtn:CreateFontString(nil,"OVERLAY","GameFontNormalSmall")
+    pasteLbl:SetAllPoints(pasteBtn); pasteLbl:SetJustifyH("CENTER"); pasteLbl:SetJustifyV("MIDDLE")
+    pasteLbl:SetText("|cffd4af37Paste|r")
+    pasteBtn:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(pasteBtn,"ANCHOR_BOTTOM")
+        GameTooltip:AddLine("Paste Roster",1,1,1)
+        if clipboardLabel then
+            GameTooltip:AddLine("Clipboard: "..clipboardLabel,0.8,0.8,0.8)
+        end
+        GameTooltip:Show()
+    end)
+    pasteBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    pasteBtn:Hide()
+
+    -- Paste confirmation popup
+    local pasteConfirm = CreateFrame("Frame", nil, UIParent)
+    pasteConfirm:SetSize(380, 80)
+    pasteConfirm:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+    pasteConfirm:SetFrameStrata("FULLSCREEN_DIALOG")
+    pasteConfirm:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=3,right=3,top=3,bottom=3}})
+    pasteConfirm:SetBackdropColor(0.04,0.06,0.13,0.98)
+    pasteConfirm:SetBackdropBorderColor(0.78,0.61,0.23,1)
+    pasteConfirm:Hide()
+
+    local pasteConfirmText = pasteConfirm:CreateFontString(nil,"OVERLAY","GameFontNormal")
+    pasteConfirmText:SetPoint("TOP",pasteConfirm,"TOP",0,-14)
+    pasteConfirmText:SetWidth(360)
+    pasteConfirmText:SetJustifyH("CENTER")
+
+    local pasteYes = CreateFrame("Button",nil,pasteConfirm)
+    pasteYes:SetSize(120,22); pasteYes:SetPoint("BOTTOMLEFT",pasteConfirm,"BOTTOMLEFT",16,10)
+    pasteYes:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+    pasteYes:SetBackdropColor(0.10,0.08,0.02,1); pasteYes:SetBackdropBorderColor(0.78,0.61,0.23,0.9)
+    pasteYes:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+    local pasteYesLbl = pasteYes:CreateFontString(nil,"OVERLAY","GameFontNormal")
+    pasteYesLbl:SetAllPoints(pasteYes); pasteYesLbl:SetJustifyH("CENTER")
+    pasteYesLbl:SetText("|cffd4af37Yes, Paste|r")
+
+    local pasteNo = CreateFrame("Button",nil,pasteConfirm)
+    pasteNo:SetSize(120,22); pasteNo:SetPoint("BOTTOMRIGHT",pasteConfirm,"BOTTOMRIGHT",-16,10)
+    pasteNo:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+    pasteNo:SetBackdropColor(0.10,0.08,0.02,1); pasteNo:SetBackdropBorderColor(0.78,0.61,0.23,0.9)
+    pasteNo:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+    local pasteNoLbl = pasteNo:CreateFontString(nil,"OVERLAY","GameFontNormal")
+    pasteNoLbl:SetAllPoints(pasteNo); pasteNoLbl:SetJustifyH("CENTER")
+    pasteNoLbl:SetText("|cffd4af37Cancel|r")
+    pasteNo:SetScript("OnClick", function() pasteConfirm:Hide() end)
+
+    copyBtn:SetScript("OnClick", function()
+        local roster, size = GetCurrentRoster()
+        local t    = LichborneTrackerDB.raidTier  or 0
+        local name = LichborneTrackerDB.raidName  or "?"
+        local grp  = LichborneTrackerDB.raidGroup or "A"
+        -- Deep copy the roster
+        rosterClipboard = {}
+        for i = 1, MAX_RAID_SLOTS do
+            local r = roster[i] or {}
+            rosterClipboard[i] = {
+                name  = r.name  or "",
+                cls   = r.cls   or "",
+                spec  = r.spec  or "",
+                gs    = r.gs    or 0,
+                realGs = r.realGs or 0,
+                role  = r.role  or "",
+                notes = r.notes or "",
+            }
+        end
+        clipboardLabel = "T"..t.." "..name.." ("..grp..")"
+        pasteBtn:Show()
+        if LichborneAddStatus then
+            LichborneAddStatus:SetText("|cffd4af37Roster copied to clipboard: "..clipboardLabel.."|r")
+        end
+    end)
+
+    pasteYes:SetScript("OnClick", function()
+        pasteConfirm:Hide()
+        if not rosterClipboard then return end
+        local roster, size = GetCurrentRoster()
+        -- Only paste up to destination size, clear any slots beyond it
+        for i = 1, MAX_RAID_SLOTS do
+            if i <= size then
+                local src = rosterClipboard[i] or {}
+                roster[i] = {
+                    name  = src.name  or "",
+                    cls   = src.cls   or "",
+                    spec  = src.spec  or "",
+                    gs    = src.gs    or 0,
+                    realGs = src.realGs or 0,
+                    role  = src.role  or "",
+                    notes = src.notes or "",
+                }
+            else
+                roster[i] = {name="", cls="", spec="", gs=0, realGs=0, role="", notes=""}
+            end
+        end
+        -- Clear clipboard and hide paste button
+        rosterClipboard = nil
+        clipboardLabel  = nil
+        pasteBtn:Hide()
+        RefreshRaidRows()
+        if LichborneAddStatus then
+            LichborneAddStatus:SetText("|cffd4af37Roster copied!|r")
+        end
+    end)
+
+    pasteBtn:SetScript("OnClick", function()
+        if not rosterClipboard then pasteBtn:Hide(); return end
+        local t    = LichborneTrackerDB.raidTier  or 0
+        local name = LichborneTrackerDB.raidName  or "?"
+        local grp  = LichborneTrackerDB.raidGroup or "A"
+        local destLabel = "T"..t.." "..name.." ("..grp..")"
+        pasteConfirmText:SetText("|cffd4af37Copy "..clipboardLabel.." roster to "..destLabel.."?|r")
+        pasteConfirm:SetPoint("CENTER",UIParent,"CENTER",0,0)
+        pasteConfirm:Show()
+    end)
+
+    -- Clear All button
+    local clearBtn = CreateFrame("Button", nil, tierBar)
+    clearBtn:SetSize(60, 20)
+    clearBtn:SetPoint("RIGHT", tierBar, "RIGHT", -4, 0)
+    clearBtn:SetFrameLevel(fl + 12)
+    clearBtn:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+    clearBtn:SetBackdropColor(0.25,0.04,0.04,1)
+    clearBtn:SetBackdropBorderColor(0.8,0.1,0.1,0.9)
+    clearBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+    local clearLbl = clearBtn:CreateFontString(nil,"OVERLAY","GameFontNormalSmall")
+    clearLbl:SetAllPoints(clearBtn); clearLbl:SetJustifyH("CENTER"); clearLbl:SetJustifyV("MIDDLE")
+    clearLbl:SetText("|cffd4af37Clear|r")
+    clearBtn:SetScript("OnEnter",function()
+        GameTooltip:SetOwner(clearBtn,"ANCHOR_BOTTOM")
+        GameTooltip:AddLine("Clear All Raid Slots",1,1,1)
+        GameTooltip:AddLine("Removes all characters from the raid.",0.8,0.8,0.8)
+        GameTooltip:Show()
+    end)
+    clearBtn:SetScript("OnLeave",function() GameTooltip:Hide() end)
+
+    -- Confirm popup for Clear All
+    local confirmFrame = CreateFrame("Frame","LichborneRaidClearConfirm",UIParent)
+    confirmFrame:SetSize(300,90)
+    confirmFrame:SetPoint("CENTER",UIParent,"CENTER",0,0)
+    confirmFrame:SetFrameStrata("FULLSCREEN_DIALOG")
+    confirmFrame:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=16,insets={left=3,right=3,top=3,bottom=3}})
+    confirmFrame:SetBackdropColor(0.04,0.06,0.13,0.98)
+    confirmFrame:SetBackdropBorderColor(0.78,0.61,0.23,1)
+    confirmFrame:Hide()
+    local confText = confirmFrame:CreateFontString(nil,"OVERLAY","GameFontNormal")
+    confText:SetPoint("TOP",confirmFrame,"TOP",0,-12)
+    confText:SetText("|cffC69B3AClear all raid slots?|r")
+    local confSub = confirmFrame:CreateFontString(nil,"OVERLAY","GameFontNormalSmall")
+    confSub:SetPoint("TOP",confText,"BOTTOM",0,-4)
+    confSub:SetText("|cffaaaaaa This cannot be undone.|r")
+    local yesBtn = CreateFrame("Button",nil,confirmFrame)
+    yesBtn:SetSize(100,24); yesBtn:SetPoint("BOTTOMLEFT",confirmFrame,"BOTTOMLEFT",16,10)
+    yesBtn:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+    yesBtn:SetBackdropColor(0.25,0.04,0.04,1); yesBtn:SetBackdropBorderColor(0.8,0.1,0.1,0.9)
+    yesBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+    local yesLbl=yesBtn:CreateFontString(nil,"OVERLAY","GameFontNormal"); yesLbl:SetAllPoints(yesBtn); yesLbl:SetJustifyH("CENTER"); yesLbl:SetText("|cffff4444Yes, Clear|r")
+    yesBtn:SetScript("OnClick",function()
+        local rosterC, sizeC = GetCurrentRoster()
+        for i=1,sizeC do rosterC[i]={name="",cls="",spec="",gs=0,realGs=0,role="",notes=""} end
+        RefreshRaidRows()
+        confirmFrame:Hide()
+    end)
+    local noBtn = CreateFrame("Button",nil,confirmFrame)
+    noBtn:SetSize(100,24); noBtn:SetPoint("BOTTOMRIGHT",confirmFrame,"BOTTOMRIGHT",-16,10)
+    noBtn:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+    noBtn:SetBackdropColor(0.04,0.15,0.04,1); noBtn:SetBackdropBorderColor(0.1,0.7,0.1,0.9)
+    noBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+    local noLbl=noBtn:CreateFontString(nil,"OVERLAY","GameFontNormal"); noLbl:SetAllPoints(noBtn); noLbl:SetJustifyH("CENTER"); noLbl:SetText("|cff44ff44Cancel|r")
+    noBtn:SetScript("OnClick",function() confirmFrame:Hide() end)
+
+    clearBtn:SetScript("OnClick",function()
+        confirmFrame:SetPoint("CENTER",UIParent,"CENTER",0,0)
+        confirmFrame:Show()
+    end)
+
+    -- Column headers row
+    local hdrRow = CreateFrame("Frame",nil,LichborneRaidFrame)
+    hdrRow:SetPoint("TOPLEFT",LichborneRaidFrame,"TOPLEFT",0,-26)
+    hdrRow:SetSize(535,18)
+    hdrRow:SetFrameLevel(fl+11)
+    local hdrBg = hdrRow:CreateTexture(nil,"BACKGROUND"); hdrBg:SetAllPoints(hdrRow); hdrBg:SetTexture(0.08,0.20,0.42,1)
+
+    local function RH(lbl,x,w)
+        local fs=hdrRow:CreateFontString(nil,"OVERLAY","GameFontNormalSmall")
+        fs:SetPoint("LEFT",hdrRow,"LEFT",x,0); fs:SetWidth(w); fs:SetJustifyH("CENTER")
+        fs:SetText("|cffd4af37"..lbl.."|r")
+    end
+
+    -- Layout constants for raid rows (both columns identical, 530px wide)
+    local RD=0; local RC=20; local RS=42; local RN=66; local RG=178; local RRealGS=232; local RT=286; local RRole=334; local RNotes=362; local RInvX=0; local RDelX=0  -- InvX/DelX unused, buttons use RIGHT anchor
+    -- Spec header icon only (no class icon header)
+    local specHdrTex = hdrRow:CreateTexture(nil, "OVERLAY")
+    specHdrTex:SetPoint("LEFT", hdrRow, "LEFT", RS, 0)
+    specHdrTex:SetSize(18, 16)
+    specHdrTex:SetTexture("Interface\\Icons\\Ability_Rogue_Deadliness")
+    RH("Name",RN+2,108); RH("iLvl",RG+2,50); RH("GS",RRealGS+2,50); RH("Needs",RT+2,46); RH("Role",RRole,26); RH("Notes",RNotes+2,120)
+
+    -- Build 40 raid rows (2 columns of 20)
+    local ROW_H = 22
+    local COL2_X = 530
+
+    for i=1,40 do
+        local col = i <= 20 and 0 or COL2_X
+        local rowIdx = i <= 20 and (i-1) or (i-21)
+        local yOff = -46 - rowIdx * ROW_H
+
+        local rf = CreateFrame("Frame","LichborneRaidRow"..i,LichborneRaidFrame)
+        rf:SetPoint("TOPLEFT",LichborneRaidFrame,"TOPLEFT",col,yOff)
+        rf:SetSize(530,ROW_H)
+        rf:SetFrameLevel(fl+11)
+
+        local rbg = rf:CreateTexture(nil,"BACKGROUND"); rbg:SetAllPoints(rf)
+        rbg:SetTexture(i%2==0 and 0.05 or 0.07, i%2==0 and 0.07 or 0.09, i%2==0 and 0.13 or 0.16, 1)
+
+        -- Row number label (behind drag handle)
+        local rnum = rf:CreateFontString(nil,"OVERLAY","GameFontNormalSmall")
+        rnum:SetPoint("LEFT",rf,"LEFT",RD+2,0); rnum:SetWidth(16); rnum:SetJustifyH("CENTER")
+        rnum:SetTextColor(0.4,0.4,0.5); rnum:SetText(tostring(i))
+
+        -- Hover/drop highlight textures (same as class tab)
+        rf:EnableMouse(true)
+        local raidHov = rf:CreateTexture(nil,"OVERLAY"); raidHov:SetAllPoints(rf); raidHov:SetTexture(0,0,0,0); rf.raidHov = raidHov
+        local raidDropHi = rf:CreateTexture(nil,"OVERLAY"); raidDropHi:SetAllPoints(rf); raidDropHi:SetTexture(0,0,0,0); rf.raidDropHi = raidDropHi
+        rf:SetScript("OnEnter", function()
+            if not raidDragSource then
+                raidHov:SetTexture(0.78, 0.61, 0.23, 0.12)
+            end
+        end)
+        rf:SetScript("OnLeave", function()
+            if not raidDragSource then
+                raidHov:SetTexture(0, 0, 0, 0)
+            end
+        end)
+
+        -- Drag handle button (same style as class tab, shows row number)
+        local dragBtn = CreateFrame("Button",nil,rf)
+        dragBtn:SetPoint("LEFT",rf,"LEFT",RD,0); dragBtn:SetSize(18,ROW_H)
+        dragBtn:SetFrameLevel(rf:GetFrameLevel()+5)
+        local dragTex2 = dragBtn:CreateTexture(nil,"ARTWORK"); dragTex2:SetAllPoints(dragBtn)
+        dragTex2:SetTexture("Interface\\ChatFrame\\ChatFrameBackground")
+        dragTex2:SetVertexColor(0.2,0.3,0.5,0)  -- invisible by default
+        dragBtn:SetScript("OnEnter",function()
+            if not raidDragSource then
+                dragTex2:SetVertexColor(0.9,0.7,0.1,1.0)
+                GameTooltip:SetOwner(dragBtn,"ANCHOR_RIGHT")
+                GameTooltip:AddLine("Drag to reorder",1,1,1)
+                GameTooltip:Show()
+            end
+        end)
+        dragBtn:SetScript("OnLeave",function()
+            if not raidDragSource then dragTex2:SetVertexColor(0.2,0.3,0.5,0) end
+            GameTooltip:Hide()
+        end)
+        dragBtn:SetScript("OnMouseDown",function(_, mouseButton)
+            if mouseButton == "LeftButton" then
+                local roster2, _ = GetCurrentRoster()
+                local d2 = roster2[i]
+                if d2 and d2.name and d2.name ~= "" then
+                    raidDragSource = i
+                    raidMouseHeld = true
+                    dragTex2:SetVertexColor(0.9,0.7,0.1,1.0)
+                    raidHov:SetTexture(0.9,0.7,0.1,0.12)
+                end
+            end
+        end)
+        dragBtn:SetScript("OnMouseUp",function()
+            raidMouseHeld = false
+        end)
+        rf.raidDragBtn = dragBtn; rf.raidDragTex = dragTex2; rf.raidRowIdx = i
+
+        -- Class icon (plain Frame, same as All tab)
+        local clsBtn = CreateFrame("Frame",nil,rf)
+        clsBtn:SetPoint("LEFT",rf,"LEFT",RC,0); clsBtn:SetSize(18,18)
+        local clsTex = clsBtn:CreateTexture(nil,"ARTWORK"); clsTex:SetAllPoints(clsBtn); clsTex:SetTexture(0,0,0,0)
+        rf.classIcon = clsTex
+        -- Class is set automatically when adding from class tabs
+
+        -- Spec icon (Button so it receives mouse events for future use)
+        local specBtn = CreateFrame("Button",nil,rf)
+        specBtn:SetPoint("LEFT",rf,"LEFT",RS,0); specBtn:SetSize(18,18)
+        specBtn:SetFrameLevel(rf:GetFrameLevel()+2)
+        specBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+        local specTex=specBtn:CreateTexture(nil,"ARTWORK"); specTex:SetAllPoints(specBtn); specTex:SetTexture(0,0,0,0)
+        rf.specIcon=specTex; rf.specBtn=specBtn
+
+        -- Name editbox
+        local nb=CreateFrame("EditBox",nil,rf)
+        nb:SetPoint("LEFT",rf,"LEFT",RN,0); nb:SetSize(106,ROW_H-2)
+        nb:SetAutoFocus(false); nb:SetMaxLetters(24)
+        nb:SetFont("Fonts\\FRIZQT__.TTF",10)
+        nb:SetTextColor(0.9,0.95,1.0)
+        nb:SetBackdrop({bgFile="Interface\\Tooltips\\UI-Tooltip-Background",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=1,right=1,top=1,bottom=1}})
+        nb:SetBackdropColor(0.05,0.07,0.14,0.6)
+        nb:SetBackdropBorderColor(0.12,0.18,0.30,0.5)
+        nb:SetScript("OnEnterPressed",function() nb:ClearFocus() end)
+        nb:SetScript("OnTabPressed",function() nb:ClearFocus() end)
+        nb:SetScript("OnEscapePressed",function() nb:ClearFocus() end)
+        rf.nameBox=nb
+
+        -- iLvl editbox
+        local gsb=CreateFrame("EditBox",nil,rf)
+        gsb:SetPoint("LEFT",rf,"LEFT",RG,0); gsb:SetSize(50,ROW_H-2)
+        gsb:SetAutoFocus(false); gsb:SetMaxLetters(5)
+        gsb:SetFont("Fonts\\FRIZQT__.TTF",10,"OUTLINE")
+        gsb:SetTextColor(0.831, 0.686, 0.216); gsb:SetJustifyH("CENTER")
+        gsb:SetBackdrop({bgFile="Interface\\Tooltips\\UI-Tooltip-Background",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=1,right=1,top=1,bottom=1}})
+        gsb:SetBackdropColor(0.05,0.07,0.14,0.6)
+        gsb:SetBackdropBorderColor(0.12,0.18,0.30,0.5)
+        gsb:SetScript("OnEnterPressed",function() gsb:ClearFocus() end)
+        gsb:SetScript("OnTabPressed",function() gsb:ClearFocus() end)
+        gsb:SetScript("OnEscapePressed",function() gsb:ClearFocus() end)
+        rf.gsBox=gsb
+        gsb:SetScript("OnEnter", function() rf.raidHov:SetTexture(0.78, 0.61, 0.23, 0.12) end)
+        gsb:SetScript("OnLeave", function() if GetMouseFocus()~=rf then rf.raidHov:SetTexture(0,0,0,0) end end)
+
+        -- GS editbox
+        local realGsb=CreateFrame("EditBox",nil,rf)
+        realGsb:SetPoint("LEFT",rf,"LEFT",RRealGS,0); realGsb:SetSize(50,ROW_H-2)
+        realGsb:SetAutoFocus(false); realGsb:SetMaxLetters(5)
+        realGsb:SetFont("Fonts\\FRIZQT__.TTF",10,"OUTLINE")
+        realGsb:SetTextColor(0.831, 0.686, 0.216); realGsb:SetJustifyH("CENTER")
+        realGsb:SetBackdrop({bgFile="Interface\\Tooltips\\UI-Tooltip-Background",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=1,right=1,top=1,bottom=1}})
+        realGsb:SetBackdropColor(0.05,0.07,0.14,0.6)
+        realGsb:SetBackdropBorderColor(0.12,0.18,0.30,0.5)
+        realGsb:SetScript("OnEnterPressed",function() realGsb:ClearFocus() end)
+        realGsb:SetScript("OnTabPressed",function() realGsb:ClearFocus() end)
+        realGsb:SetScript("OnEscapePressed",function() realGsb:ClearFocus() end)
+        rf.realGsBox=realGsb
+        realGsb:SetScript("OnEnter", function() rf.raidHov:SetTexture(0.78, 0.61, 0.23, 0.12) end)
+        realGsb:SetScript("OnLeave", function() if GetMouseFocus()~=rf then rf.raidHov:SetTexture(0,0,0,0) end end)
+
+        -- Needs cell (replaces Tier)
+        local raidRowIdx = i
+        rf.needsCell = MakeNeedsCell(rf, RT, ROW_H, function()
+            local roster5, _ = GetCurrentRoster()
+            local d5 = roster5[raidRowIdx]
+            return d5 and d5.name or ""
+        end, rf.raidHov, 46)
+
+        -- Role button (icon-only 22px, after Needs)
+        local roleBtn = CreateFrame("Button",nil,rf)
+        roleBtn:SetPoint("LEFT",rf,"LEFT",RRole,0); roleBtn:SetSize(26,ROW_H-2)
+        roleBtn:SetFrameLevel(rf:GetFrameLevel()+6)
+        roleBtn:SetBackdrop({bgFile="Interface\\Tooltips\\UI-Tooltip-Background",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=1,right=1,top=1,bottom=1}})
+        roleBtn:SetBackdropColor(0.05,0.07,0.14,0.8); roleBtn:SetBackdropBorderColor(0.20,0.30,0.50,0.4)
+        roleBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+        local roleIcon=roleBtn:CreateTexture(nil,"ARTWORK")
+        roleIcon:SetPoint("CENTER",roleBtn,"CENTER",0,0); roleIcon:SetSize(16,16)
+        roleIcon:SetTexture(0,0,0,0)
+        local roleLbl=roleBtn:CreateFontString(nil,"OVERLAY","GameFontNormalSmall")
+        roleLbl:SetAllPoints(roleBtn); roleLbl:SetJustifyH("CENTER"); roleLbl:SetJustifyV("MIDDLE")
+        roleLbl:SetText(""); rf.roleBtn=roleBtn; rf.roleLbl=roleLbl; rf.roleIcon=roleIcon
+        HookRowHighlight(roleBtn, rf, rf.raidHov)
+
+        -- Notes editbox
+        local notesBox=CreateFrame("EditBox",nil,rf)
+        notesBox:SetPoint("LEFT",rf,"LEFT",RNotes,0); notesBox:SetSize(120,ROW_H-2)
+        notesBox:SetAutoFocus(false); notesBox:SetMaxLetters(24)
+        notesBox:SetFont("Fonts\\FRIZQT__.TTF",9); notesBox:SetTextColor(0.85,0.85,0.70)
+        notesBox:SetBackdrop({bgFile="Interface\\Tooltips\\UI-Tooltip-Background",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=1,right=1,top=1,bottom=1}})
+        notesBox:SetBackdropColor(0.05,0.07,0.10,0.6); notesBox:SetBackdropBorderColor(0.25,0.25,0.15,0.5)
+        notesBox:SetScript("OnEnterPressed",function() notesBox:ClearFocus() end)
+        notesBox:SetScript("OnTabPressed",function() notesBox:ClearFocus() end)
+        notesBox:SetScript("OnEscapePressed",function() notesBox:ClearFocus() end)
+        rf.notesBox=notesBox
+        notesBox:SetScript("OnEnter", function() rf.raidHov:SetTexture(0.78, 0.61, 0.23, 0.12) end)
+        notesBox:SetScript("OnLeave", function() if GetMouseFocus()~=rf then rf.raidHov:SetTexture(0,0,0,0) end end)
+
+        -- Class btn reference for color updates
+        rf.classBtn=clsBtn; rf.classBtnTex=clsTex
+
+        -- Clear/delete button (far right)
+        local db=CreateFrame("Button",nil,rf)
+        db:SetPoint("RIGHT",rf,"RIGHT",-2,0)
+        db:SetSize(16,ROW_H-2)
+        db:SetNormalFontObject("GameFontNormalSmall"); db:SetText("|cffaa2222x|r")
+        db:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+        db:SetScript("OnEnter", function()
+            GameTooltip:SetOwner(db, "ANCHOR_RIGHT")
+            GameTooltip:AddLine("Remove from Raid", 1, 0.3, 0.3)
+            GameTooltip:AddLine("Clears this slot in the raid roster.", 0.8, 0.8, 0.8)
+            GameTooltip:AddLine("Character remains in the tracker.", 0.6, 0.6, 0.6)
+            GameTooltip:Show()
+        end)
+        db:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        rf.delBtn=db
+
+        -- Invite to group > button
+        local invb = CreateFrame("Button", nil, rf)
+        invb:SetPoint("RIGHT",rf,"RIGHT",-20,0)
+        invb:SetSize(16, ROW_H-2)
+        invb:SetNormalFontObject("GameFontNormalSmall"); invb:SetText("|cff44eeff>|r")
+        invb:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight", "ADD")
+        invb:SetScript("OnEnter", function()
+            GameTooltip:SetOwner(invb, "ANCHOR_RIGHT")
+            GameTooltip:AddLine("|cff44eeff> Invite to Group|r", 1,1,1)
+            GameTooltip:AddLine("Sends a party invite to this player.", 0.7,0.7,0.7)
+            GameTooltip:Show()
+        end)
+        invb:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        invb:SetScript("OnClick", function()
+            local roster, _ = GetCurrentRoster()
+            local d = roster[i]
+            if d and d.name and d.name ~= "" then
+                SendChatMessage(".playerbots bot add "..d.name, "SAY")
+                if LichborneAddStatus then
+                    LichborneAddStatus:SetText("|cffd4af37Invited "..d.name.." to group.|r")
+                end
+            end
+        end)
+        rf.invBtn = invb
+
+        -- Hook child elements to propagate row highlight
+        local rHov = rf.raidHov
+        HookRowHighlight(dragBtn, rf, rHov)
+        HookRowHighlight(db, rf, rHov)
+        HookRowHighlight(invb, rf, rHov)
+        if rf.specBtn then HookRowHighlight(rf.specBtn, rf, rHov) end
+        if rf.roleBtn then HookRowHighlight(rf.roleBtn, rf, rHov) end
+
+        -- Divider
+        local ln=rf:CreateTexture(nil,"OVERLAY"); ln:SetHeight(1); ln:SetWidth(530)
+        ln:SetPoint("BOTTOMLEFT",rf,"BOTTOMLEFT",0,0); ln:SetTexture(0.10,0.16,0.28,0.4)
+
+        raidRowFrames[i]=rf
+    end
+
+    -- ── Raid drag-to-reorder (same logic as class tabs) ────────
+    -- raidMouseHeld: set true on OnMouseDown, false on OnMouseUp
+    -- This avoids IsMouseButtonDown which is unreliable in 3.3.5a
+    LichborneTrackerFrame:HookScript("OnMouseUp", function()
+        if raidDragSource then
+            raidMouseHeld = false
+        end
+    end)
+
+    raidDragPoll:SetScript("OnUpdate", function()
+        if not raidDragSource then return end
+        if not raidMouseHeld then
+            -- Mouse released - find target and swap
+            local cx, cy = GetCursorPosition()
+            local sc = UIParent:GetEffectiveScale()
+            cx, cy = cx/sc, cy/sc
+            local targetIdx = nil
+            for j, rf2 in ipairs(raidRowFrames) do
+                if rf2:IsShown() and j ~= raidDragSource then
+                    local roster2, _ = GetCurrentRoster()
+                    local d2 = roster2[j]
+                    if d2 and d2.name and d2.name ~= "" then
+                        local l,r,b,t = rf2:GetLeft(),rf2:GetRight(),rf2:GetBottom(),rf2:GetTop()
+                        if l and cx>=l and cx<=r and cy>=b and cy<=t then
+                            targetIdx = j; break
+                        end
+                    end
+                end
+            end
+            if targetIdx then
+                local roster3, _ = GetCurrentRoster()
+                local a, b2 = raidDragSource, targetIdx
+                if a ~= b2 then
+                    local item = {name=roster3[a].name,cls=roster3[a].cls,spec=roster3[a].spec,gs=roster3[a].gs,realGs=roster3[a].realGs,role=roster3[a].role,notes=roster3[a].notes}
+                    -- Shift rows between a and b2
+                    if a < b2 then
+                        for k = a, b2 - 1 do roster3[k] = roster3[k+1] end
+                    else
+                        for k = a, b2 + 1, -1 do roster3[k] = roster3[k-1] end
+                    end
+                    roster3[b2] = item
+                    raidSortMode = nil  -- clear sort so drag order sticks
+                    RefreshRaidRows()
+                end
+            end
+            for _, rf2 in ipairs(raidRowFrames) do
+                if rf2.raidHov then rf2.raidHov:SetTexture(0,0,0,0) end
+                if rf2.raidDropHi then rf2.raidDropHi:SetTexture(0,0,0,0) end
+                if rf2.raidDragTex then rf2.raidDragTex:SetVertexColor(0.2,0.3,0.5,0) end
+            end
+            raidDragSource = nil
+            return
+        end
+        -- Dragging - highlight target
+        local cx, cy = GetCursorPosition()
+        local sc = UIParent:GetEffectiveScale()
+        cx, cy = cx/sc, cy/sc
+        for j, rf2 in ipairs(raidRowFrames) do
+            if rf2:IsShown() and j ~= raidDragSource then
+                local l,r,b,t = rf2:GetLeft(),rf2:GetRight(),rf2:GetBottom(),rf2:GetTop()
+                if l then
+                    if cx>=l and cx<=r and cy>=b and cy<=t then
+                        rf2.raidDropHi:SetTexture(0.9,0.7,0.1,0.20)
+                    else
+                        rf2.raidDropHi:SetTexture(0,0,0,0)
+                    end
+                end
+            end
+        end
+    end)
+
+    -- Second column header
+    local hdrRow2 = CreateFrame("Frame",nil,LichborneRaidFrame)
+    hdrRow2:SetPoint("TOPLEFT",LichborneRaidFrame,"TOPLEFT",COL2_X,-26)
+    hdrRow2:SetSize(535,18); hdrRow2:SetFrameLevel(fl+11)
+    local hdrBg2=hdrRow2:CreateTexture(nil,"BACKGROUND"); hdrBg2:SetAllPoints(hdrRow2); hdrBg2:SetTexture(0.08,0.20,0.42,1)
+    local RH2 = function(lbl,x,w)
+        local fs=hdrRow2:CreateFontString(nil,"OVERLAY","GameFontNormalSmall")
+        fs:SetPoint("LEFT",hdrRow2,"LEFT",x,0); fs:SetWidth(w); fs:SetJustifyH("CENTER")
+        fs:SetText("|cffd4af37"..lbl.."|r")
+    end
+    local specHdrTex2 = hdrRow2:CreateTexture(nil, "OVERLAY")
+    specHdrTex2:SetPoint("LEFT", hdrRow2, "LEFT", RS, 0)
+    specHdrTex2:SetSize(18, 16)
+    specHdrTex2:SetTexture("Interface\\Icons\\Ability_Rogue_Deadliness")
+    RH2("Name",RN+2,108); RH2("iLvl",RG+2,50); RH2("GS",RRealGS+2,50); RH2("Needs",RT+2,46); RH2("Role",RRole,26); RH2("Notes",RNotes+2,120)
+
+        -- ── Raid class count bar ──────────────────────────────────
+    local raidCountBar = CreateFrame("Frame","LichborneRaidCountBar",LichborneRaidFrame)
+    _G["LichborneRaidCountBar"] = raidCountBar
+    raidCountBar:SetPoint("TOPLEFT", LichborneRaidFrame, "TOPLEFT", 0, -488)
+    raidCountBar:SetSize(1080, 24)
+    raidCountBar:SetFrameLevel(fl + 11)
+    local rcbBg = raidCountBar:CreateTexture(nil,"BACKGROUND")
+    rcbBg:SetAllPoints(raidCountBar); rcbBg:SetTexture(0.05, 0.07, 0.13, 1)
+    local rcTitle = raidCountBar:CreateFontString(nil,"OVERLAY","GameFontNormalSmall")
+    rcTitle:SetPoint("LEFT", raidCountBar, "LEFT", 4, 0)
+    rcTitle:SetText("|cffC69B3ACount:|r"); rcTitle:SetWidth(44)
+    LichborneRaidCountLabels = {}
+    local rcW = (1080 - 50) / 10
+    local rcIdx = 0
+    for ci, cls in ipairs(CLASS_TABS) do
+        if cls == "Raid" or cls == "All" then break end
+        rcIdx = rcIdx + 1
+        local c = CLASS_COLORS[cls]
+        local rcSw = CreateFrame("Button", nil, raidCountBar)
+        rcSw:SetSize(rcW - 2, 20)
+        rcSw:SetPoint("LEFT", raidCountBar, "LEFT", 48 + (rcIdx-1)*rcW, 0)
+        rcSw:SetFrameLevel(raidCountBar:GetFrameLevel() + 1)
+        local rcBg2 = rcSw:CreateTexture(nil,"BACKGROUND"); rcBg2:SetAllPoints(rcSw)
+        rcBg2:SetTexture(0.08, 0.10, 0.18, 1); rcSw.bg = rcBg2
+        local hex = string.format("|cff%02x%02x%02x", math.floor(c.r*255), math.floor(c.g*255), math.floor(c.b*255))
+        local rcLbl = rcSw:CreateFontString(nil,"OVERLAY","GameFontNormalSmall")
+        rcLbl:SetAllPoints(rcSw); rcLbl:SetJustifyH("CENTER"); rcLbl:SetJustifyV("MIDDLE")
+        rcLbl:SetText(hex..(TAB_LABELS[cls])..": "..hex.."0|r")
+        rcSw.lbl = rcLbl; rcSw.cls = cls
+        LichborneRaidCountLabels[cls] = rcLbl
+        rcSw:SetScript("OnEnter", function()
+            GameTooltip:SetOwner(rcSw,"ANCHOR_TOP")
+            GameTooltip:AddLine(cls, c.r, c.g, c.b)
+            GameTooltip:Show()
+        end)
+        rcSw:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    end
+
+    -- ── Invite Raid button (anchored below raid frame) ────────
+    -- Invite button lives on main frame beside Add Target/Update GS buttons
+
+    local inviteBtn = CreateFrame("Button","LichborneInviteRaidBtn",LichborneRaidFrame:GetParent())
+    inviteBtn:SetPoint("BOTTOMLEFT", LichborneRaidFrame:GetParent(), "BOTTOMLEFT", 525, 10)
+    inviteBtn:SetSize(180, 130)
+    inviteBtn:SetFrameLevel(fl + 12)
+    inviteBtn:Hide()  -- hidden until Raid tab is active
+    inviteBtn:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+    inviteBtn:SetBackdropColor(0.05,0.20,0.05,1)
+    inviteBtn:SetBackdropBorderColor(0.78,0.61,0.23,0.9)
+    inviteBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+    local inviteLbl = inviteBtn:CreateFontString(nil,"OVERLAY","GameFontNormal")
+    inviteLbl:SetAllPoints(inviteBtn); inviteLbl:SetJustifyH("CENTER"); inviteLbl:SetJustifyV("MIDDLE")
+    inviteLbl:SetText("|cffd4af37Invite Raid|r")
+    inviteBtn.lbl = inviteLbl
+    inviteBtn:SetScript("OnEnter",function()
+        local roster, size = GetCurrentRoster()
+        local count = 0
+        for i=1,size do if roster[i] and roster[i].name and roster[i].name ~= "" then count=count+1 end end
+        GameTooltip:SetOwner(inviteBtn,"ANCHOR_TOP")
+        if activeInviteFrame then
+            GameTooltip:AddLine("Stop Invite",1,1,1)
+            GameTooltip:AddLine("Cancels the running invite script.",0.8,0.8,0.8)
+        else
+            GameTooltip:AddLine("Invite Raid",1,1,1)
+            GameTooltip:AddLine(count.." players in this roster",0.8,0.8,0.8)
+            GameTooltip:AddLine("1. Log out all current bots",0.6,0.6,0.6)
+            GameTooltip:AddLine("2. Leave current party",0.6,0.6,0.6)
+            GameTooltip:AddLine("3. Invite first player",0.6,0.6,0.6)
+            GameTooltip:AddLine("4. Convert to raid",0.6,0.6,0.6)
+            GameTooltip:AddLine("5. Invite remaining players",0.6,0.6,0.6)
+        end
+        GameTooltip:Show()
+    end)
+    inviteBtn:SetScript("OnLeave",function() GameTooltip:Hide() end)
+
+    inviteBtn:SetScript("OnClick",function()
+        -- If already inviting, act as Stop
+        if activeInviteFrame then
+            activeInviteFrame:SetScript("OnUpdate", nil)
+            activeInviteFrame = nil
+            SetInviteActive(false)
+            UpdateInviteButtons()
+            DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cffff4444Invite stopped.|r", 1, 0.85, 0)
+            if LichborneAddStatus then LichborneAddStatus:SetText("|cffff4444Invite stopped.") end
+            return
+        end
+        local roster, size = GetCurrentRoster()
+        -- Collect non-empty names
+        local names = {}
+        for i=1,size do
+            local r = roster[i]
+            if r and r.name and r.name ~= "" then
+                names[#names+1] = r.name
+            end
+        end
+        if #names == 0 then
+            DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r No players in this roster.",1,0.5,0.5)
+            return
+        end
+
+        SetInviteActive(true)
+        DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Starting raid invite for "..#names.." players...",1,0.85,0)
+        if LichborneAddStatus then LichborneAddStatus:SetText("|cffff9900Removing current bots by name...") end
+
+        -- Step 0: Leave party immediately
+        LeaveParty()
+
+        -- Collect all known bot names across ALL rosters to remove individually
+        local botsToRemove = {}
+        local seen = {}
+        local allRosters = LichborneTrackerDB.raidRosters or {}
+        for _, roster in pairs(allRosters) do
+            for i = 1, MAX_RAID_SLOTS do
+                local r = roster[i]
+                if r and r.name and r.name ~= "" and not seen[r.name:lower()] then
+                    seen[r.name:lower()] = true
+                    botsToRemove[#botsToRemove+1] = r.name
+                end
+            end
+        end
+        -- Fallback: if no rosters found, just remove the current invite list
+        if #botsToRemove == 0 then
+            for _, n in ipairs(names) do botsToRemove[#botsToRemove+1] = n end
+        end
+
+        local inviteIndex = 1
+        local waitTime = 0
+        local phase = "logout_remove"
+        local logoutIndex = 1
+        local reinviteSubPhase = "remove"
+
+        local inviteFrame = CreateFrame("Frame")
+        activeInviteFrame = inviteFrame
+        UpdateInviteButtons()
+        inviteFrame:SetScript("OnUpdate",function(_, elapsed)
+            waitTime = waitTime + elapsed
+
+            if phase == "logout_remove" then
+                if waitTime < 0.1 then return end
+                waitTime = 0
+                if logoutIndex > #botsToRemove then
+                    phase = "logout_wait"
+                    waitTime = 0
+                    DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r All bots removed, waiting...",1,0.85,0)
+                    if LichborneAddStatus then LichborneAddStatus:SetText("|cffff9900Waiting for bots to clear...") end
+                    return
+                end
+                local bname = botsToRemove[logoutIndex]
+                SendChatMessage(".playerbots bot remove "..bname, "SAY")
+                logoutIndex = logoutIndex + 1
+
+            elseif phase == "logout_wait" then
+                if waitTime < 2.0 then return end
+                waitTime = 0
+                phase = "first"
+                DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Bots cleared, starting invites...",1,0.85,0)
+                if LichborneAddStatus then LichborneAddStatus:SetText("|cffff9900Inviting "..#names.." players...") end
+
+            elseif phase == "first" then
+                if waitTime < 0.5 then return end
+                local firstName = names[1]
+                SendChatMessage(".playerbots bot add "..firstName, "SAY")
+                DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Inviting "..firstName.."...",1,0.85,0)
+                inviteIndex = 2
+                waitTime = 0
+                phase = "convert"
+
+            elseif phase == "convert" then
+                if waitTime < 2.0 then return end
+                ConvertToRaid()
+                DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Converting to raid...",1,0.85,0)
+                waitTime = 0
+                phase = "rest"
+
+            elseif phase == "rest" then
+                if waitTime < 0.8 then return end
+                waitTime = 0
+                if inviteIndex > #names then
+                    -- Initial pass done — wait 3s then verify who's missing
+                    phase = "verify_wait"
+                    waitTime = 0
+                    DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Initial invites sent, verifying...",1,0.85,0)
+                    return
+                end
+                local pname = names[inviteIndex]
+                SendChatMessage(".playerbots bot add "..pname, "SAY")
+                DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Inviting "..pname.."...",1,0.85,0)
+                inviteIndex = inviteIndex + 1
+
+            elseif phase == "verify_wait" then
+                if waitTime < 3.0 then return end
+                -- Build set of who is currently in the raid
+                local inRaid = {}
+                for i = 1, GetNumRaidMembers() do
+                    local rname = UnitName("raid"..i)
+                    if rname then inRaid[rname:lower()] = true end
+                end
+                local selfName = UnitName("player")
+                if selfName then inRaid[selfName:lower()] = true end
+                -- Find missing
+                local missing = {}
+                for _, pname in ipairs(names) do
+                    if not inRaid[pname:lower()] then
+                        missing[#missing+1] = pname
+                    end
+                end
+                if #missing == 0 then
+                    DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cff44ff44All "..#names.." players confirmed in raid!|r",1,0.85,0)
+                    if LichborneAddStatus then LichborneAddStatus:SetText("|cff44ff44All "..#names.." players confirmed in raid.|r") end
+                    inviteFrame:SetScript("OnUpdate",nil)
+                    activeInviteFrame = nil
+                    SetInviteActive(false)
+                    UpdateInviteButtons()
+                    return
+                end
+                DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cffff9900"..#missing.." missed — re-inviting...|r",1,0.85,0)
+                names = missing
+                inviteIndex = 1
+                phase = "reinvite"
+                waitTime = 0
+
+            elseif phase == "reinvite" then
+                -- remove then wait 1s then add, per missed character
+                if reinviteSubPhase == "remove" then
+                    if inviteIndex > #names then
+                        DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cff44ff44Re-invite pass complete.|r",1,0.85,0)
+                        if LichborneAddStatus then LichborneAddStatus:SetText("|cff44ff44Invite complete (re-invite pass done).|r") end
+                        inviteFrame:SetScript("OnUpdate",nil)
+                        activeInviteFrame = nil
+                        SetInviteActive(false)
+                        UpdateInviteButtons()
+                        return
+                    end
+                    local pname = names[inviteIndex]
+                    SendChatMessage(".playerbots bot remove "..pname, "SAY")
+                    DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Removing "..pname.." before re-invite...",1,0.85,0)
+                    waitTime = 0
+                    reinviteSubPhase = "add"
+
+                elseif reinviteSubPhase == "add" then
+                    if waitTime < 1.0 then return end
+                    local pname = names[inviteIndex]
+                    SendChatMessage(".playerbots bot add "..pname, "SAY")
+                    DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Re-inviting "..pname.."...",1,0.85,0)
+                    inviteIndex = inviteIndex + 1
+                    waitTime = 0
+                    reinviteSubPhase = "remove"
+                end
+            end
+        end)
+    end)
+
+    -- ── Invite Group button (for T0 5-mans, no raid conversion) ──
+    local inviteGroupBtn = CreateFrame("Button","LichborneInviteGroupBtn",LichborneRaidFrame:GetParent())
+    inviteGroupBtn:SetPoint("BOTTOMLEFT", LichborneRaidFrame:GetParent(), "BOTTOMLEFT", 525, 10)
+    inviteGroupBtn:SetSize(180, 130)
+    inviteGroupBtn:SetFrameLevel(fl + 12)
+    inviteGroupBtn:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+    inviteGroupBtn:SetBackdropColor(0.05,0.25,0.30,1)
+    inviteGroupBtn:SetBackdropBorderColor(0.78,0.61,0.23,0.9)
+    inviteGroupBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+    inviteGroupBtn:Hide()
+    local inviteGroupLbl = inviteGroupBtn:CreateFontString(nil,"OVERLAY","GameFontNormal")
+    inviteGroupLbl:SetAllPoints(inviteGroupBtn); inviteGroupLbl:SetJustifyH("CENTER"); inviteGroupLbl:SetJustifyV("MIDDLE")
+    inviteGroupLbl:SetText("|cffd4af37Invite Group|r")
+    inviteGroupBtn.lbl = inviteGroupLbl
+    inviteGroupBtn:SetScript("OnEnter",function()
+        local roster, size = GetCurrentRoster()
+        local count = 0
+        for i=1,size do if roster[i] and roster[i].name and roster[i].name ~= "" then count=count+1 end end
+        GameTooltip:SetOwner(inviteGroupBtn,"ANCHOR_TOP")
+        if activeInviteFrame then
+            GameTooltip:AddLine("Stop Invite",1,1,1)
+            GameTooltip:AddLine("Cancels the running invite script.",0.8,0.8,0.8)
+        else
+            GameTooltip:AddLine("Invite Group (5-Man)",1,1,1)
+            GameTooltip:AddLine(count.." players in this roster",0.8,0.8,0.8)
+            GameTooltip:AddLine("Leaves party, then invites all",0.6,0.6,0.6)
+            GameTooltip:AddLine("players as a normal party.",0.6,0.6,0.6)
+        end
+        GameTooltip:Show()
+    end)
+    inviteGroupBtn:SetScript("OnLeave",function() GameTooltip:Hide() end)
+    inviteGroupBtn:SetScript("OnClick",function()
+        -- If already inviting, act as Stop
+        if activeInviteFrame then
+            activeInviteFrame:SetScript("OnUpdate", nil)
+            activeInviteFrame = nil
+            SetInviteActive(false)
+            UpdateInviteButtons()
+            DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cffff4444Invite stopped.|r", 1, 0.85, 0)
+            if LichborneAddStatus then LichborneAddStatus:SetText("|cffff4444Invite stopped.") end
+            return
+        end
+        local roster, size = GetCurrentRoster()
+        local names = {}
+        for i=1,size do
+            local r = roster[i]
+            if r and r.name and r.name ~= "" then names[#names+1] = r.name end
+        end
+        if #names == 0 then
+            DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r No players in this roster.",1,0.5,0.5)
+            return
+        end
+        SetInviteActive(true)
+        DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Starting group invite for "..#names.." players...",1,0.85,0)
+        LeaveParty()
+        local invIdx = 1
+        local waited = 0
+        local grpFrame = CreateFrame("Frame")
+        activeInviteFrame = grpFrame
+        UpdateInviteButtons()
+        grpFrame:SetScript("OnUpdate",function(_, elapsed)
+            waited = waited + elapsed
+            if waited < 0.8 then return end
+            waited = 0
+            if invIdx > #names then
+                DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cff44ff44Group invite complete! ("..#names.." players)|r",1,0.85,0)
+                grpFrame:SetScript("OnUpdate",nil)
+                activeInviteFrame = nil
+                SetInviteActive(false)
+                UpdateInviteButtons()
+                return
+            end
+            local pname = names[invIdx]
+            SendChatMessage(".playerbots bot add "..pname, "SAY")
+            DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Inviting "..pname.."...",1,0.85,0)
+            invIdx = invIdx + 1
+        end)
+    end)
+    _G["LichborneInviteGroupBtn"] = inviteGroupBtn
+    UpdateInviteButtons()
+
+end
+
+
+-- Helper: get current All group rows
+local function GetCurrentAllRows()
+    if not LichborneTrackerDB.allGroups then
+        LichborneTrackerDB.allGroups = {}
+    end
+    if not LichborneTrackerDB.allGroup then LichborneTrackerDB.allGroup = "A" end
+    local g = LichborneTrackerDB.allGroup
+    if not LichborneTrackerDB.allGroups[g] then
+        LichborneTrackerDB.allGroups[g] = {}
+        for i=1,60 do LichborneTrackerDB.allGroups[g][i]={name="",cls="",spec="",gs=0,realGs=0} end
+    end
+    local rows = LichborneTrackerDB.allGroups[g]
+    for i=1,60 do if not rows[i] then rows[i]={name="",cls="",spec="",gs=0,realGs=0} end end
+    return rows
+end
+
+-- ── All tab: mirrors Raid tab with 3 columns of 20 = 60 slots ──────────
+RefreshAllRows = function()
+    if not LichborneAllFrame then return end
+    local rows = GetCurrentAllRows()
+
+    -- Update All tab group label
+    local g = LichborneTrackerDB.allGroup or "A"
+    if LichborneAllPageLbl then
+        local pageNum = ({A="1",B="2",C="3"})[g] or g
+        LichborneAllPageLbl:SetText("|cffd4af37Page "..pageNum.." v|r")
+    end
+
+    -- Overflow sync: rebuild all three groups from class tabs sequentially
+    -- A=slots 1-60, B=slots 61-120, C=slots 121-180
+    -- Collect ALL tracked characters in order
+    local allTracked = {}
+    for _, classRow in ipairs(LichborneTrackerDB.rows or {}) do
+        if classRow.name and classRow.name ~= "" then
+            allTracked[#allTracked+1] = classRow
+        end
+    end
+    -- Fill groups in order
+    local groups = {"A","B","C"}
+    for gi, g in ipairs(groups) do
+        if not LichborneTrackerDB.allGroups[g] then
+            LichborneTrackerDB.allGroups[g] = {}
+        end
+        local gRows = LichborneTrackerDB.allGroups[g]
+        for i=1,60 do if not gRows[i] then gRows[i]={name="",cls="",spec="",gs=0,realGs=0} end end
+        local startIdx = (gi-1)*60 + 1
+        local endIdx   = gi*60
+        -- Clear first
+        for i=1,60 do gRows[i]={name="",cls="",spec="",gs=0,realGs=0} end
+        -- Fill with tracked chars for this range
+        for i=startIdx,endIdx do
+            local slot = i - startIdx + 1
+            if allTracked[i] then
+                local cr = allTracked[i]
+                gRows[slot] = {name=cr.name, cls=cr.cls or "", spec=cr.spec or "", gs=cr.gs or 0, realGs=cr.realGs or 0}
+            end
+        end
+    end
+    -- Re-get rows for current group display
+    rows = GetCurrentAllRows()
+
+    -- Apply sort if active (sort a copy so DB order is unchanged)
+    if allSortMode then
+        local function nameEmpty(r) return not r.name or r.name == "" end
+        local sorted = {}
+        for i = 1, 60 do sorted[i] = rows[i] end
+        if allSortMode == "name" then
+            table.sort(sorted, function(a, b)
+                if nameEmpty(a) ~= nameEmpty(b) then return not nameEmpty(a) end
+                return (a.name or "") < (b.name or "")
+            end)
+        elseif allSortMode == "classspec" then
+            table.sort(sorted, function(a, b)
+                if nameEmpty(a) ~= nameEmpty(b) then return not nameEmpty(a) end
+                if (a.cls or "") ~= (b.cls or "") then return (a.cls or "") < (b.cls or "") end
+                if (a.spec or "") ~= (b.spec or "") then return (a.spec or "") < (b.spec or "") end
+                return (a.name or "") < (b.name or "")
+            end)
+        elseif allSortMode == "gs" then
+            table.sort(sorted, function(a, b)
+                if nameEmpty(a) ~= nameEmpty(b) then return not nameEmpty(a) end
+                local ga, gb2 = a.realGs or 0, b.realGs or 0
+                if ga ~= gb2 then return ga > gb2 end
+                return (a.name or "") < (b.name or "")
+            end)
+        end
+        rows = sorted
+    end
+
+    for i = 1, 60 do
+        local rf = allRowFrames[i]
+        if not rf then break end
+        local data = rows[i]
+        local dataRef = data
+        local hasData = data.name and data.name ~= ""
+
+        -- Sync spec from class tabs
+        if hasData then
+            for _, r in ipairs(LichborneTrackerDB.rows) do
+                if r.name and r.name:lower() == data.name:lower() then
+                    if r.spec and r.spec ~= "" then data.spec = r.spec end
+                    if r.cls and r.cls ~= "" then data.cls = r.cls end
+                    if r.gs and r.gs > 0 then data.gs = r.gs end
+                    data.realGs = r.realGs or 0
+                    break
+                end
+            end
+        end
+
+        -- Needs cell refresh
+        if rf.needsCell then
+            RefreshNeedsCell(rf.needsCell, data.name or "")
+        end
+
+        -- Class icon
+        if rf.classIcon then
+            local cIcon = CLASS_ICONS[data.cls or ""]
+            if cIcon and hasData then rf.classIcon:SetTexture(cIcon); rf.classIcon:SetAlpha(1)
+            else rf.classIcon:SetTexture(0,0,0,0) end
+        end
+        -- Spec icon
+        if rf.specIcon then
+            local sIcon = data.spec and data.spec ~= "" and SPEC_ICONS[data.spec]
+            if sIcon and hasData then rf.specIcon:SetTexture(sIcon); rf.specIcon:SetAlpha(1)
+            elseif hasData then rf.specIcon:SetTexture("Interface\\Icons\\INV_Misc_QuestionMark"); rf.specIcon:SetAlpha(0.2)
+            else rf.specIcon:SetTexture(0,0,0,0) end
+        end
+        -- Name (read-only - populated from class tabs)
+        if rf.nameBox then
+            local name = data.name or ""
+            rf.nameBox.readOnly = name  -- store for OnChar guard
+            rf.nameBox:SetScript("OnTextChanged", nil)
+            rf.nameBox:SetText(name)
+            local c = data.cls and CLASS_COLORS[data.cls]
+            if c then rf.nameBox:SetTextColor(c.r, c.g, c.b)
+            else rf.nameBox:SetTextColor(0.7,0.8,0.9) end
+            -- Prevent editing - restore on any change
+            rf.nameBox:SetScript("OnTextChanged", function()
+                if rf.nameBox:GetText() ~= (rf.nameBox.readOnly or "") then
+                    rf.nameBox:SetText(rf.nameBox.readOnly or "")
+                end
+            end)
+        end
+        -- iLvl
+        if rf.gsBox then
+            rf.gsBox:SetScript("OnTextChanged", nil)
+            rf.gsBox:SetText(data.gs and data.gs > 0 and tostring(data.gs) or "")
+            rf.gsBox:SetScript("OnTextChanged", function()
+                local raw = rf.gsBox:GetText()
+                local clean = raw:gsub("%D","")
+                if clean ~= raw then rf.gsBox:SetText(clean); return end
+                local gs = tonumber(clean) or 0
+                dataRef.gs = gs
+                local classIdx, classRow = FindTrackedRowIndexByName(dataRef.name or "")
+                if classIdx and classRow then
+                    LichborneTrackerDB.rows[classIdx].gs = gs
+                end
+            end)
+        end
+        -- GS
+        if rf.realGsBox then
+            rf.realGsBox:SetScript("OnTextChanged", nil)
+            rf.realGsBox:SetText(data.realGs and data.realGs > 0 and tostring(data.realGs) or "")
+            rf.realGsBox:SetScript("OnTextChanged", function()
+                local raw = rf.realGsBox:GetText()
+                local clean = raw:gsub("%D","")
+                if clean ~= raw then rf.realGsBox:SetText(clean); return end
+                local realGs = tonumber(clean) or 0
+                dataRef.realGs = realGs
+                local classIdx, classRow = FindTrackedRowIndexByName(dataRef.name or "")
+                if classIdx and classRow then
+                    LichborneTrackerDB.rows[classIdx].realGs = realGs
+                end
+            end)
+        end
+        -- Row number
+        if rf.numLbl then rf.numLbl:SetText(tostring(i)) end
+        -- No delete on All tab
+
+        -- Spec button popup (same menu as raid/class tabs)
+        if rf.specIcon then
+            local specFrame = rf.specIcon and rf.specIcon:GetParent()
+            if specFrame then
+                specFrame:SetScript("OnEnter", function()
+                    local d4 = dataRef
+                    local spec = d4 and d4.spec or ""
+                    local cls = d4 and d4.cls or ""
+                    local c = cls ~= "" and CLASS_COLORS[cls]
+                    GameTooltip:SetOwner(specFrame, "ANCHOR_RIGHT")
+                    if spec ~= "" then
+                        GameTooltip:AddLine(spec, 1, 1, 1)
+                    end
+                    if cls ~= "" then
+                        if c then GameTooltip:AddLine(cls, c.r, c.g, c.b)
+                        else GameTooltip:AddLine(cls, 0.8, 0.8, 0.9) end
+                    end
+                    if spec == "" and cls == "" then
+                        GameTooltip:AddLine("Empty", 0.4, 0.4, 0.4)
+                    end
+                    GameTooltip:Show()
+                end)
+                specFrame:SetScript("OnLeave", function() GameTooltip:Hide() end)
+            end
+        end
+        -- Add to Group btn
+        if rf.addGroupBtn then
+            rf.addGroupBtn:SetScript("OnClick", function()
+                local d = dataRef
+                if not d or not d.name or d.name == "" then return end
+                SendChatMessage(".playerbots bot add "..d.name, "SAY")
+                local c = d.cls and CLASS_COLORS[d.cls]
+                local hex = c and string.format("|cff%02x%02x%02x",math.floor(c.r*255),math.floor(c.g*255),math.floor(c.b*255)) or "|cffffffff"
+                if LichborneAddStatus then LichborneAddStatus:SetText("Invited "..hex..d.name.."|r to group.") end
+            end)
+        end
+        -- Add to Raid btn
+        if rf.addRaidBtn then
+            rf.addRaidBtn:SetScript("OnClick", function()
+                local d = dataRef
+                if not d or not d.name or d.name == "" then return end
+                local roster, raidSize = GetCurrentRoster()
+                for ri = 1, raidSize do
+                    if roster[ri] and roster[ri].name and roster[ri].name:lower() == d.name:lower() then
+                        if LichborneAddStatus then LichborneAddStatus:SetText(d.name.." already in Raid.") end; return
+                    end
+                end
+                for ri = 1, raidSize do
+                    if not roster[ri] or roster[ri].name == "" then
+                        roster[ri] = {name=d.name, cls=d.cls or "",spec=d.spec or "",gs=d.gs or 0, realGs=d.realGs or 0, role="", notes=""}
+                        local c = d.cls and CLASS_COLORS[d.cls]
+                        local hex = c and string.format("|cff%02x%02x%02x",math.floor(c.r*255),math.floor(c.g*255),math.floor(c.b*255)) or "|cffffffff"
+                        if LichborneAddStatus then LichborneAddStatus:SetText(hex..d.name.."|r added to raid slot "..ri..".") end; return
+                    end
+                end
+                if LichborneAddStatus then LichborneAddStatus:SetText("Raid is full!") end
+            end)
+        end
+        -- Wire delete button
+        if rf.allDelBtnFrame then
+            rf.allDelBtnFrame:SetScript("OnClick", function()
+                local d = dataRef
+                if not d or not d.name or d.name == "" then return end
+                local charName = d.name
+                RemoveCharacterReferences(charName)
+                if LichborneAddStatus then
+                    LichborneAddStatus:SetText("|cffff6666"..charName.."|r removed from tracker.")
+                end
+                RefreshRows()
+                RefreshAllRows()
+                if raidRowFrames and #raidRowFrames > 0 then RefreshRaidRows() end
+            end)
+        end
+    end
+
+    -- Count bar
+    if LichborneAllCountLabels then
+        local allCounts = {}
+        for _, cls in ipairs(CLASS_TABS) do if cls ~= "Raid" and cls ~= "All" then allCounts[cls] = 0 end end
+        -- Count from ALL tracked rows, not just the current page
+        for _, r in ipairs(LichborneTrackerDB.rows or {}) do
+            if r and r.name and r.name ~= "" and r.cls and allCounts[r.cls] ~= nil then
+                allCounts[r.cls] = allCounts[r.cls] + 1
+            end
+        end
+        for cls, lbl in pairs(LichborneAllCountLabels) do
+            local c = CLASS_COLORS[cls]
+            if c then
+                local n = allCounts[cls] or 0
+                local hex = string.format("|cff%02x%02x%02x",math.floor(c.r*255),math.floor(c.g*255),math.floor(c.b*255))
+                lbl:SetText(hex..(TAB_LABELS[cls])..": |cffd4af37"..n.."|r")
+                local sw = lbl:GetParent()
+                if sw and sw.bg then
+                    if n > 0 then sw.bg:SetTexture(c.r*0.25,c.g*0.25,c.b*0.30,1)
+                    else sw.bg:SetTexture(0.08,0.10,0.18,1) end
+                end
+            end
+        end
+    end
+end  -- RefreshAllRows
+
+-- All frame uses same layout as Raid: 3 columns of 20, same row height
+local ALL_PER_COL = 20
+local ALL_NCOLS   = 3
+local ALL_COL_W   = 362   -- fits the tracker frame; internal columns are tightened to fit iLvl + GS
+
+local function BuildAllFrame(parent, fl)
+    if allFrameBuilt then return end
+    allFrameBuilt = true
+
+    LichborneAllFrame = CreateFrame("Frame","LichborneAllFrame",parent)
+    LichborneAllFrame:SetPoint("TOPLEFT",parent,"TOPLEFT",15,-94)
+    LichborneAllFrame:SetSize(ALL_NCOLS*ALL_COL_W, 512)  -- 24hdr+20+18hdr+20+440rows+10+24count
+    LichborneAllFrame:SetFrameLevel(fl+10)
+    LichborneAllFrame:Hide()
+
+    -- Green header bar
+    local allHdr = CreateFrame("Frame",nil,LichborneAllFrame)
+    allHdr:SetPoint("TOPLEFT",LichborneAllFrame,"TOPLEFT",0,0)
+    allHdr:SetSize(ALL_NCOLS*ALL_COL_W,24); allHdr:SetFrameLevel(fl+11)
+    local allHdrBg = allHdr:CreateTexture(nil,"BACKGROUND"); allHdrBg:SetAllPoints(allHdr); allHdrBg:SetTexture(0.05,0.20,0.05,1)
+    local allTitle = allHdr:CreateFontString(nil,"OVERLAY","GameFontNormal")
+    allTitle:SetPoint("TOPLEFT",allHdr,"TOPLEFT",0,0); allTitle:SetPoint("TOPRIGHT",allHdr,"TOPRIGHT",0,0)
+    allTitle:SetHeight(24); allTitle:SetJustifyH("CENTER"); allTitle:SetJustifyV("MIDDLE")
+    allTitle:SetText("|cffd4af37Character Sheet|r")
+
+    -- Sort / Clear buttons
+    local function MakeHdrBtn(lbl, br, bg2, bb, xOff, w)
+        local btn = CreateFrame("Button",nil,allHdr); btn:SetSize(w or 55,20)
+        btn:SetPoint("RIGHT",allHdr,"RIGHT",xOff,0); btn:SetFrameLevel(fl+12)
+        btn:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+        btn:SetBackdropColor(br*0.4,bg2*0.4,bb*0.4,1); btn:SetBackdropBorderColor(br,bg2,bb,0.9)
+        btn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+        local l=btn:CreateFontString(nil,"OVERLAY","GameFontNormalSmall"); l:SetAllPoints(btn); l:SetJustifyH("CENTER"); l:SetJustifyV("MIDDLE"); l:SetText(lbl)
+        return btn
+    end
+    local allSortBtn = MakeSortDropdown(allHdr, fl + 12, function(mode)
+        allSortMode = mode
+        RefreshAllRows()
+    end)
+    allSortBtn:SetPoint("LEFT", allHdr, "LEFT", 4, 0)
+
+    -- Page label (far right, dropdown trigger)
+    -- Page button - same style as Sort
+    local allPageBtn = CreateFrame("Button", "LichborneAllPageBtn", allHdr)
+    allPageBtn:SetSize(55, 20)
+    allPageBtn:SetPoint("RIGHT", allHdr, "RIGHT", -4, 0)
+    allPageBtn:SetFrameLevel(fl+12)
+    allPageBtn:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+    allPageBtn:SetBackdropColor(0.10, 0.08, 0.02, 1)
+    allPageBtn:SetBackdropBorderColor(0.78, 0.61, 0.23, 0.9)
+    allPageBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight", "ADD")
+    local allPageLbl = allPageBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    allPageLbl:SetAllPoints(allPageBtn); allPageLbl:SetJustifyH("CENTER"); allPageLbl:SetJustifyV("MIDDLE")
+    allPageLbl:SetText("|cffd4af37Page 1 v|r")
+    LichborneAllPageLbl  = allPageLbl
+    LichborneAllPagePrev = nil
+    LichborneAllPageNext = nil
+    local allPrevBtn = {}
+    local allNextBtn = {}
+
+    -- Single group dropdown on the right (replaces both left Group: and page < > buttons)
+    local function UpdateAllGroupDD()
+        local g = LichborneTrackerDB.allGroup or "A"
+        if LichborneAllPageLbl then
+            local pageNum = ({A="1",B="2",C="3"})[g] or g
+            LichborneAllPageLbl:SetText("|cffd4af37Page "..pageNum.." v|r")
+        end
+        if LichborneAllPagePrev then LichborneAllPagePrev:SetAlpha(g ~= "A" and 1.0 or 0.35) end
+        if LichborneAllPageNext then LichborneAllPageNext:SetAlpha(g ~= "C" and 1.0 or 0.35) end
+    end
+    UpdateAllGroupDD()
+
+    -- Dropdown menu triggered by clicking the Group label
+    local allGroupMenu = CreateFrame("Frame","LichborneAllGroupMenu",UIParent)
+    allGroupMenu:SetFrameStrata("TOOLTIP"); allGroupMenu:SetSize(90,3*22+8)
+    allGroupMenu:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+    allGroupMenu:SetBackdropColor(0.05,0.08,0.20,0.98); allGroupMenu:SetBackdropBorderColor(0.30,0.50,0.80,1)
+    allGroupMenu:Hide()
+    for gi, gname in ipairs({"A","B","C"}) do
+        local mb=CreateFrame("Button",nil,allGroupMenu); mb:SetSize(86,20)
+        mb:SetPoint("TOPLEFT",allGroupMenu,"TOPLEFT",2,-2-(gi-1)*22)
+        mb:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=1,right=1,top=1,bottom=1}})
+        mb:SetBackdropColor(0.05,0.08,0.20,1); mb:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+        local mblbl=mb:CreateFontString(nil,"OVERLAY","GameFontNormal"); mblbl:SetAllPoints(mb); mblbl:SetJustifyH("CENTER")
+        mblbl:SetText("|cffd4af37Page "..gi.."|r")
+        local cap=gname
+        mb:SetScript("OnClick",function()
+            LichborneTrackerDB.allGroup=cap; UpdateAllGroupDD(); allGroupMenu:Hide(); RefreshAllRows()
+        end)
+    end
+    -- Wire the page button to open the dropdown menu
+    allPageBtn:SetScript("OnClick", function()
+        if allGroupMenu:IsShown() then allGroupMenu:Hide()
+        else allGroupMenu:ClearAllPoints(); allGroupMenu:SetPoint("TOPRIGHT",allPageBtn,"BOTTOMRIGHT",0,-2); allGroupMenu:Show() end
+    end)
+
+    -- Column headers (3 cols, same as raid)
+    local RH_ALL = 22
+    for col = 0, ALL_NCOLS-1 do
+        local hdr = CreateFrame("Frame",nil,LichborneAllFrame)
+        hdr:SetPoint("TOPLEFT",LichborneAllFrame,"TOPLEFT",col*ALL_COL_W,-26)
+        hdr:SetSize(ALL_COL_W,18); hdr:SetFrameLevel(fl+11)
+        local hbg=hdr:CreateTexture(nil,"BACKGROUND"); hbg:SetAllPoints(hdr); hbg:SetTexture(0.08,0.20,0.42,1)
+        local function H(txt,x,w) local fs=hdr:CreateFontString(nil,"OVERLAY","GameFontNormalSmall"); fs:SetPoint("LEFT",hdr,"LEFT",x,0); fs:SetWidth(w); fs:SetJustifyH("CENTER"); fs:SetText("|cffd4af37"..txt.."|r") end
+        H("#",2,18); H("",20,18); H("",40,18); H("Name",62,124); H("iLvl",190,36); H("GS",228,36); H("Needs",266,38)
+    end
+
+    -- 60 rows across 3 columns
+    for i = 1, 60 do
+        local col = math.floor((i-1)/ALL_PER_COL)
+        local rowInCol = (i-1) % ALL_PER_COL
+        local rf = CreateFrame("Frame",nil,LichborneAllFrame)
+        rf:SetPoint("TOPLEFT",LichborneAllFrame,"TOPLEFT",col*ALL_COL_W,-(46+rowInCol*RH_ALL))
+        rf:SetSize(ALL_COL_W, RH_ALL); rf:SetFrameLevel(fl+11)
+        local rbg=rf:CreateTexture(nil,"BACKGROUND"); rbg:SetAllPoints(rf)
+        rbg:SetTexture(rowInCol%2==0 and 0.06 or 0.04, rowInCol%2==0 and 0.08 or 0.06, rowInCol%2==0 and 0.16 or 0.12, 1)
+        local allHov=rf:CreateTexture(nil,"OVERLAY"); allHov:SetAllPoints(rf); allHov:SetTexture(0,0,0,0)
+        rf:EnableMouse(true)
+        rf:SetScript("OnEnter", function() allHov:SetTexture(0.78, 0.61, 0.23, 0.12) end)
+        rf:SetScript("OnLeave", function() allHov:SetTexture(0, 0, 0, 0) end)
+
+        -- Row number
+        local nl=rf:CreateFontString(nil,"OVERLAY","GameFontNormalSmall"); nl:SetPoint("LEFT",rf,"LEFT",2,0); nl:SetWidth(18); nl:SetJustifyH("CENTER"); nl:SetTextColor(0.4,0.5,0.6); rf.numLbl=nl
+
+        -- Class icon
+        local cF=CreateFrame("Frame",nil,rf); cF:SetPoint("LEFT",rf,"LEFT",20,0); cF:SetSize(18,18)
+        local cT=cF:CreateTexture(nil,"ARTWORK"); cT:SetAllPoints(cF); rf.classIcon=cT
+
+        -- Spec icon
+        local sF=CreateFrame("Button",nil,rf); sF:SetPoint("LEFT",rf,"LEFT",40,0); sF:SetSize(18,18)
+        sF:SetFrameLevel(rf:GetFrameLevel()+4)
+        sF:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+        local sT=sF:CreateTexture(nil,"ARTWORK"); sT:SetAllPoints(sF); rf.specIcon=sT
+
+        -- Name editbox
+        local nb=CreateFrame("EditBox",nil,rf); nb:SetPoint("LEFT",rf,"LEFT",60,0); nb:SetSize(126,RH_ALL-2)
+        nb:SetAutoFocus(false); nb:SetMaxLetters(32); nb:SetFont("Fonts\\FRIZQT__.TTF",10); nb:SetTextColor(0.9,0.95,1.0)
+        nb:SetScript("OnChar",function() nb:SetText(nb.readOnly or "") end)  -- read-only
+        nb:SetBackdrop({bgFile="Interface\\Tooltips\\UI-Tooltip-Background",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=1,right=1,top=1,bottom=1}})
+        nb:SetBackdropColor(0.05,0.07,0.14,0.6); nb:SetBackdropBorderColor(0.12,0.18,0.30,0.5)
+        nb:SetScript("OnEnterPressed",function() nb:ClearFocus() end); nb:SetScript("OnTabPressed",function() nb:ClearFocus() end)
+        rf.nameBox=nb
+
+        -- iLvl editbox
+        local gb=CreateFrame("EditBox",nil,rf); gb:SetPoint("LEFT",rf,"LEFT",188,0); gb:SetSize(36,RH_ALL-2)
+        gb:SetAutoFocus(false); gb:SetMaxLetters(5); gb:SetFont("Fonts\\FRIZQT__.TTF",10,"OUTLINE"); gb:SetTextColor(0.831, 0.686, 0.216); gb:SetJustifyH("CENTER")
+        gb:SetBackdrop({bgFile="Interface\\Tooltips\\UI-Tooltip-Background",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=1,right=1,top=1,bottom=1}})
+        gb:SetBackdropColor(0.05,0.07,0.14,0.6); gb:SetBackdropBorderColor(0.12,0.18,0.30,0.5)
+        gb:SetScript("OnEnterPressed",function() gb:ClearFocus() end); gb:SetScript("OnTabPressed",function() gb:ClearFocus() end)
+        rf.gsBox=gb
+        gb:SetScript("OnEnter", function() allHov:SetTexture(0.78, 0.61, 0.23, 0.12) end)
+        gb:SetScript("OnLeave", function() if GetMouseFocus()~=rf then allHov:SetTexture(0,0,0,0) end end)
+
+        -- GS editbox
+        local rgb=CreateFrame("EditBox",nil,rf); rgb:SetPoint("LEFT",rf,"LEFT",226,0); rgb:SetSize(36,RH_ALL-2)
+        rgb:SetAutoFocus(false); rgb:SetMaxLetters(5); rgb:SetFont("Fonts\\FRIZQT__.TTF",10,"OUTLINE"); rgb:SetTextColor(0.831, 0.686, 0.216); rgb:SetJustifyH("CENTER")
+        rgb:SetBackdrop({bgFile="Interface\\Tooltips\\UI-Tooltip-Background",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=1,right=1,top=1,bottom=1}})
+        rgb:SetBackdropColor(0.05,0.07,0.14,0.6); rgb:SetBackdropBorderColor(0.12,0.18,0.30,0.5)
+        rgb:SetScript("OnEnterPressed",function() rgb:ClearFocus() end); rgb:SetScript("OnTabPressed",function() rgb:ClearFocus() end)
+        rf.realGsBox=rgb
+        rgb:SetScript("OnEnter", function() allHov:SetTexture(0.78, 0.61, 0.23, 0.12) end)
+        rgb:SetScript("OnLeave", function() if GetMouseFocus()~=rf then allHov:SetTexture(0,0,0,0) end end)
+
+        -- Needs cell (replaces Tier)
+        local allRowIdx = i
+        rf.needsCell = MakeNeedsCell(rf, 264, RH_ALL, function()
+            local r6 = allRowFrames[allRowIdx]
+            if r6 and r6.nameBox then return r6.nameBox.readOnly or "" end
+            return ""
+        end, allHov, 46)
+
+        -- Add to Group btn >
+        -- Add to Raid btn + (first)
+        local ar=CreateFrame("Button",nil,rf); ar:SetPoint("LEFT",rf,"LEFT",312,0); ar:SetSize(16,RH_ALL-2)
+        ar:SetNormalFontObject("GameFontNormalSmall"); ar:SetText("|cff44ff44+|r")
+        ar:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+        ar:SetScript("OnEnter",function()
+            local raidName = LichborneTrackerDB.raidName or "?"
+            local raidAbbr = RAID_ABBR and RAID_ABBR[raidName] or raidName
+            local tier = LichborneTrackerDB.raidTier or 0
+            local tierStr = tier > 0 and ("T"..tier) or "T0"
+            local grp = LichborneTrackerDB.raidGroup or "A"
+            GameTooltip:SetOwner(ar,"ANCHOR_RIGHT")
+            GameTooltip:AddLine("+ Add to Raid", 0.3, 1.0, 0.3)
+            GameTooltip:AddLine(tierStr.."  "..raidAbbr.."  Group "..grp, 1, 0.85, 0)
+            GameTooltip:Show()
+        end)
+        ar:SetScript("OnLeave",function() GameTooltip:Hide() end)
+        rf.addRaidBtn=ar
+
+        -- Invite to group btn > (second)
+        local ag=CreateFrame("Button",nil,rf); ag:SetPoint("LEFT",rf,"LEFT",330,0); ag:SetSize(16,RH_ALL-2)
+        ag:SetNormalFontObject("GameFontNormalSmall"); ag:SetText("|cff44eeff>|r")
+        ag:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+        ag:SetScript("OnEnter",function() GameTooltip:SetOwner(ag,"ANCHOR_RIGHT"); GameTooltip:AddLine("|cff44eeff> Invite to Group|r",1,1,1); GameTooltip:Show() end)
+        ag:SetScript("OnLeave",function() GameTooltip:Hide() end)
+        rf.addGroupBtn=ag
+
+        -- Delete btn x (third)
+        local dx=CreateFrame("Button",nil,rf); dx:SetPoint("LEFT",rf,"LEFT",348,0); dx:SetSize(16,RH_ALL-2)
+        dx:SetNormalFontObject("GameFontNormalSmall"); dx:SetText("|cffaa2222x|r")
+        dx:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+        dx:SetScript("OnEnter",function()
+            GameTooltip:SetOwner(dx,"ANCHOR_RIGHT")
+            GameTooltip:AddLine("Delete Character",1,0.3,0.3)
+            GameTooltip:AddLine("Permanently removes from tracker.",0.8,0.8,0.8)
+            GameTooltip:Show()
+        end)
+        dx:SetScript("OnLeave",function() GameTooltip:Hide() end)
+        rf.allDelBtn=dx
+
+        -- Hook child elements to propagate row highlight
+        HookRowHighlight(ag, rf, allHov)
+        HookRowHighlight(ar, rf, allHov)
+        HookRowHighlight(dx, rf, allHov)
+        if rf.specBtn then HookRowHighlight(rf.specBtn, rf, allHov) end
+
+        -- Wire delete button in RefreshAllRows (needs dbIndex set first)
+        rf.allDelBtnFrame = dx
+
+        -- Divider
+        local ln=rf:CreateTexture(nil,"OVERLAY"); ln:SetHeight(1); ln:SetWidth(ALL_COL_W)
+        ln:SetPoint("BOTTOMLEFT",rf,"BOTTOMLEFT",0,0); ln:SetTexture(0.10,0.16,0.28,0.4)
+
+        allRowFrames[i]=rf
+    end
+
+    -- Count bar at bottom
+    local cbY = -(46 + ALL_PER_COL*RH_ALL + 2)  -- below last row
+    local allCB = CreateFrame("Frame","LichborneAllCountBar",LichborneAllFrame)
+    allCB:SetPoint("TOPLEFT",LichborneAllFrame,"TOPLEFT",0,cbY)
+    allCB:SetSize(ALL_NCOLS*ALL_COL_W,24); allCB:SetFrameLevel(fl+11)
+    local acbBg=allCB:CreateTexture(nil,"BACKGROUND"); acbBg:SetAllPoints(allCB); acbBg:SetTexture(0.05,0.07,0.13,1)
+    local acT=allCB:CreateFontString(nil,"OVERLAY","GameFontNormalSmall"); acT:SetPoint("LEFT",allCB,"LEFT",4,0); acT:SetText("|cffC69B3ACount:|r"); acT:SetWidth(44)
+    LichborneAllCountLabels={}
+    local acW=(ALL_NCOLS*ALL_COL_W-50)/10
+    for ci,cls in ipairs(CLASS_TABS) do
+        if cls=="Raid" or cls=="All" then break end
+        local c=CLASS_COLORS[cls]
+        local sw=CreateFrame("Button",nil,allCB); sw:SetSize(acW-2,20); sw:SetPoint("LEFT",allCB,"LEFT",48+(ci-1)*acW,0)
+        sw:SetFrameLevel(allCB:GetFrameLevel()+1)
+        local sbg=sw:CreateTexture(nil,"BACKGROUND"); sbg:SetAllPoints(sw); sbg:SetTexture(0.08,0.10,0.18,1); sw.bg=sbg
+        local hex=string.format("|cff%02x%02x%02x",math.floor(c.r*255),math.floor(c.g*255),math.floor(c.b*255))
+        local sl=sw:CreateFontString(nil,"OVERLAY","GameFontNormalSmall"); sl:SetAllPoints(sw); sl:SetJustifyH("CENTER"); sl:SetJustifyV("MIDDLE")
+        sl:SetText(hex..(TAB_LABELS[cls])..": "..hex.."0|r"); sw.lbl=sl; LichborneAllCountLabels[cls]=sl
+    end
+end
+
+
+local function OnFirstShow()
+    if setupDone then return end
+    setupDone = true
+    local f = LichborneTrackerFrame
+    local fl = f:GetFrameLevel()
+
+    -- Tabs (centered in frame)
+    local tabFrame = CreateFrame("Frame", "LichborneTabBar", f)
+    tabFrame:SetPoint("TOP", f, "TOP", 0, -64)
+    tabFrame:SetSize(1090, 28)
+    tabFrame:SetFrameLevel(fl + 8)
+    local tabW = 1090 / 12
+    for i, cls in ipairs(CLASS_TABS) do
+        local btn = CreateFrame("Button", "LichborneTab"..i, tabFrame)
+        btn:SetSize(tabW - 1, 26)
+        btn:SetPoint("LEFT", tabFrame, "LEFT", (i-1)*tabW, 0)
+        btn:SetFrameLevel(fl + 9)
+        local bg = btn:CreateTexture(nil, "BACKGROUND")
+        bg:SetAllPoints(btn); bg:SetTexture(0.05, 0.07, 0.12, 1)
+        btn.bg = bg
+        local bl = btn:CreateTexture(nil, "OVERLAY")
+        bl:SetHeight(3); bl:SetWidth(tabW-1)
+        bl:SetPoint("BOTTOM", btn, "BOTTOM", 0, 0)
+        bl:SetTexture(0, 0, 0, 0)
+        btn.bottomLine = bl
+        local cc = CLASS_COLORS[cls]
+        local hex
+        if cls == "Raid" or cls == "All" then
+            hex = cls == "All" and "|cffd4af37" or "|cffC69B3A"
+        else
+            hex = cc and string.format("|cff%02x%02x%02x",math.floor(cc.r*255),math.floor(cc.g*255),math.floor(cc.b*255)) or "|cffdddddd"
+        end
+        local lbl = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        lbl:SetAllPoints(btn); lbl:SetJustifyH("CENTER"); lbl:SetJustifyV("MIDDLE")
+        lbl:SetText(hex..(TAB_LABELS[cls] or cls).."|r")
+        btn:SetScript("OnClick", function()
+            activeTab = cls
+            UpdateTabs()
+            RefreshRows()
+        end)
+        btn:SetScript("OnEnter", function()
+            btn:SetAlpha(1.0)
+            GameTooltip:SetOwner(btn,"ANCHOR_BOTTOM")
+            GameTooltip:SetText(cls,1,1,1); GameTooltip:Show()
+        end)
+        btn:SetScript("OnLeave", function()
+            if cls ~= activeTab then btn:SetAlpha(0.5) end
+            GameTooltip:Hide()
+        end)
+        tabButtons[cls] = btn
+    end
+    UpdateTabs()
+
+    -- Column headers
+    local hf = CreateFrame("Frame", "LichborneHeaderBar", f)
+    hf:SetPoint("TOPLEFT", f, "TOPLEFT", 15, -94)
+    hf:SetSize(1086, 20)
+    hf:SetFrameLevel(fl + 10)
+    local hbg = hf:CreateTexture(nil, "BACKGROUND")
+    hbg:SetAllPoints(hf); hbg:SetTexture(0.08, 0.20, 0.42, 1)
+
+    -- Gold border wrapping header through count bar
+    local contentBorder = CreateFrame("Frame", nil, f)
+    contentBorder:SetPoint("TOPLEFT", f, "TOPLEFT", 13, -92)
+    contentBorder:SetSize(1090, 518)
+    contentBorder:SetFrameLevel(fl + 9)
+    contentBorder:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+    contentBorder:SetBackdropColor(0, 0, 0, 0)
+    contentBorder:SetBackdropBorderColor(0.78, 0.61, 0.23, 0.9)
+    local function H(lbl, x, w)
+        local fs = hf:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        fs:SetPoint("LEFT", hf, "LEFT", x, 0)
+        fs:SetWidth(w); fs:SetJustifyH("CENTER")
+        fs:SetText("|cffd4af37"..lbl.."|r")
+    end
+    local specHdr = hf:CreateTexture(nil, "OVERLAY")
+    specHdr:SetPoint("LEFT", hf, "LEFT", SPEC_OFF + 1, 0)
+    specHdr:SetSize(COL_SPEC_W - 2, 18)
+    specHdr:SetTexture("Interface\\Icons\\Ability_Rogue_Deadliness")
+    H("Name", NAME_OFF+2, COL_NAME_W-4)
+    H("iLvl", GS_OFF+2,   COL_GS_W-4)
+    H("GS",   REALGS_OFF+2,   COL_GS_W-4)
+    H("Needs", NEEDS_OFF+2, COL_NEEDS_W-4)
+    for g, a in ipairs(SLOT_ABBR) do H(a, GEAR_OFF+(g-1)*COL_GEAR_W, COL_GEAR_W) end
+
+    -- Sort dropdown button (far left, before drag handle)
+    local classSortBtn = MakeSortDropdown(hf, hf:GetFrameLevel(), function(mode)
+        classSortMode = mode
+        RefreshRows()
+    end)
+    classSortBtn:SetPoint("LEFT", hf, "LEFT", 4, 0)
+
+    -- Page controls (after Tier column)
+    local pageX = GEAR_OFF + GEAR_SLOTS * COL_GEAR_W + 8
+
+    -- Page dropdown button (like Group: in All tab)
+    local pageDDBtn = CreateFrame("Button", "LichbornePageDD", hf)
+    pageDDBtn:SetPoint("RIGHT", hf, "RIGHT", -4, 0)
+    pageDDBtn:SetSize(44, 16); pageDDBtn:SetFrameLevel(hf:GetFrameLevel()+2)
+    pageDDBtn:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=8,edgeSize=6,insets={left=1,right=1,top=1,bottom=1}})
+    pageDDBtn:SetBackdropColor(0.10, 0.08, 0.02, 1); pageDDBtn:SetBackdropBorderColor(0.78, 0.61, 0.23, 0.9)
+    pageDDBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+    local pageDDLbl = pageDDBtn:CreateFontString(nil,"OVERLAY","GameFontNormalSmall")
+    pageDDLbl:SetAllPoints(pageDDBtn); pageDDLbl:SetJustifyH("CENTER"); pageDDLbl:SetJustifyV("MIDDLE")
+    pageDDLbl:SetText("|cffd4af37Page 1 v|r")
+
+    -- Dropdown menu
+    local pageDDMenu = CreateFrame("Frame","LichbornePageDDMenu",UIParent)
+    pageDDMenu:SetFrameStrata("TOOLTIP"); pageDDMenu:SetSize(74, MAX_PAGES*22+8)
+    pageDDMenu:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+    pageDDMenu:SetBackdropColor(0.05,0.08,0.20,0.98); pageDDMenu:SetBackdropBorderColor(0.30,0.50,0.80,1)
+    pageDDMenu:Hide()
+    for p = 1, MAX_PAGES do
+        local mb = CreateFrame("Button",nil,pageDDMenu); mb:SetSize(70,20)
+        mb:SetPoint("TOPLEFT",pageDDMenu,"TOPLEFT",2,-2-(p-1)*22)
+        mb:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=1,right=1,top=1,bottom=1}})
+        mb:SetBackdropColor(0.05,0.08,0.20,1); mb:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+        local mblbl = mb:CreateFontString(nil,"OVERLAY","GameFontNormalSmall"); mblbl:SetAllPoints(mb); mblbl:SetJustifyH("CENTER")
+        mblbl:SetText("|cffd4af37Page "..p.."|r")
+        local cap = p
+        mb:SetScript("OnClick", function()
+            classPage[activeTab] = cap
+            pageDDMenu:Hide()
+            RefreshRows()
+        end)
+    end
+    pageDDBtn:SetScript("OnClick", function()
+        if pageDDMenu:IsShown() then pageDDMenu:Hide()
+        else
+            pageDDMenu:ClearAllPoints()
+            pageDDMenu:SetPoint("TOPLEFT", pageDDBtn, "BOTTOMLEFT", 0, -2)
+            pageDDMenu:Show()
+        end
+    end)
+
+    -- Store ref so RefreshRows can update the label
+    LichbornePageLbl = pageDDLbl
+    LichbornePageDD  = pageDDBtn
+
+    -- Build row frames parented directly to main frame, below headers
+    BuildRows(f, -118)
+
+    -- Tier key
+    local kf = CreateFrame("Frame", "LichborneTierKeyFrame", f)
+    kf:SetPoint("TOP", f, "TOP", 0, -36)
+    kf:SetSize(1086, 30)
+    kf:SetFrameLevel(fl + 10)
+    local kbg = kf:CreateTexture(nil, "BACKGROUND")
+    kbg:SetAllPoints(kf); kbg:SetTexture(0.04, 0.06, 0.12, 1)
+    local tl = kf:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    -- Center: 17 swatches * 51px = 867px, label ~66px, total ~933px, center in 1086
+    local swW = 51
+    local totalW = 66 + 17 * swW  -- label width + swatches
+    local startX = math.floor((1086 - totalW) / 2)
+    tl:SetPoint("LEFT", kf, "LEFT", startX, 0); tl:SetText("|cffC69B3ATier Key:|r")
+    local sx = startX + 66
+    for t = 1, 17 do
+        local col  = t - 1
+        local yOff = -3
+        local c = TIER_COLORS[t]
+        local sf = CreateFrame("Frame", nil, kf)
+        sf:SetSize(swW-2, 22)
+        sf:SetPoint("TOPLEFT", kf, "TOPLEFT", sx+col*swW, yOff)
+        sf:SetFrameLevel(kf:GetFrameLevel()+1)
+        local sbg = sf:CreateTexture(nil, "BACKGROUND")
+        sbg:SetAllPoints(sf); sbg:SetTexture(c.r, c.g, c.b, 1)
+        local lum = 0.299*c.r+0.587*c.g+0.114*c.b
+        local tr,tg,tb = 1,1,1; if lum>0.45 then tr,tg,tb=0.05,0.05,0.05 end
+        local lbl = sf:CreateFontString(nil, "OVERLAY")
+        lbl:SetFont("Fonts\\FRIZQT__.TTF", 9, "OUTLINE")
+        lbl:SetAllPoints(sf); lbl:SetJustifyH("CENTER"); lbl:SetJustifyV("MIDDLE")
+        lbl:SetTextColor(tr,tg,tb); lbl:SetText("T"..t)
+        sf:EnableMouse(true)
+        sf:SetScript("OnEnter", function()
+            GameTooltip:SetOwner(sf, "ANCHOR_TOP")
+            local tc = TIER_COLORS[t]
+            local hex = string.format("%02x%02x%02x",math.floor(tc.r*255),math.floor(tc.g*255),math.floor(tc.b*255))
+            GameTooltip:AddLine("|cff"..hex.."Tier "..t.."|r")
+            GameTooltip:AddLine(TIER_LABELS[t],1,1,1); GameTooltip:Show()
+        end)
+        sf:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    end
+
+    -- Avg iLvl bar
+    local avgFrame = CreateFrame("Frame", "LichborneAvgBar", f)
+    LichborneAvgBar = avgFrame
+    avgFrame:SetPoint("TOPLEFT", f, "TOPLEFT", 15, -558)
+    avgFrame:SetSize(1086, 24)
+    avgFrame:SetFrameLevel(fl + 10)
+    local avgbg = avgFrame:CreateTexture(nil, "BACKGROUND")
+    avgbg:SetAllPoints(avgFrame); avgbg:SetTexture(0.05, 0.07, 0.13, 1)
+    local avgTitle = avgFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    avgTitle:SetPoint("LEFT", avgFrame, "LEFT", 4, 0)
+    avgTitle:SetText("|cffC69B3AAvg iLvl:|r"); avgTitle:SetWidth(52)
+    LichborneAvgSwatches = {}
+    -- Roster block is 130px wide, 4px gap, label is 56px: swatches fill 1086-56-4-130 = 896px for 10 classes
+    local rosterBlockW = 130
+    local swTotalW = 1086 - 56 - 4 - rosterBlockW
+    local swW = swTotalW / 10
+    local avgIdx = 0
+    for i, cls in ipairs(CLASS_TABS) do
+        if cls == "Raid" then break end
+        avgIdx = avgIdx + 1
+        local c = CLASS_COLORS[cls]
+        local sw = CreateFrame("Button", "LichborneAvgSwatch"..avgIdx, avgFrame)
+        sw:SetSize(swW - 2, 20)
+        sw:SetPoint("LEFT", avgFrame, "LEFT", 56 + (avgIdx-1)*swW, 0)
+        sw:SetFrameLevel(avgFrame:GetFrameLevel() + 1)
+        local swbg = sw:CreateTexture(nil, "BACKGROUND")
+        swbg:SetAllPoints(sw); swbg:SetTexture(0.08, 0.10, 0.18, 1); sw.bg = swbg
+        local hex = string.format("|cff%02x%02x%02x", math.floor(c.r*255), math.floor(c.g*255), math.floor(c.b*255))
+        local lbl = sw:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        lbl:SetAllPoints(sw); lbl:SetJustifyH("CENTER"); lbl:SetJustifyV("MIDDLE")
+        lbl:SetText(hex..(TAB_LABELS[cls])..": |cff555555--|r"); sw.lbl = lbl; sw.cls = cls
+        sw:EnableMouse(true)
+        sw:SetScript("OnEnter", function()
+            GameTooltip:SetOwner(sw, "ANCHOR_TOP")
+            local avg = GetClassAvgIlvl(cls)
+            GameTooltip:AddLine(TAB_LABELS[cls], c.r, c.g, c.b)
+            GameTooltip:AddLine("Average item level of all tracked "..TAB_LABELS[cls].."s.", 1,1,1)
+            if avg > 0 then
+                GameTooltip:AddLine("Current: |cffd4af37"..avg.."|r", 1,1,1)
+            else
+                GameTooltip:AddLine("No gear data yet.", 0.6,0.6,0.6)
+            end
+            GameTooltip:AddLine("Click to switch to this tab.", 0.5,0.5,0.5)
+            GameTooltip:Show()
+        end)
+        sw:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        sw:SetScript("OnClick", function()
+            activeTab = cls
+            UpdateTabs()
+            RefreshRows()
+        end)
+        LichborneAvgSwatches[i] = sw
+    end
+
+    -- Roster iLvl block — right-anchored, gold border, fills remaining space
+    local rosterIlvlBlock = CreateFrame("Frame", "LichborneRosterIlvlBlock", avgFrame)
+    rosterIlvlBlock:SetPoint("RIGHT", avgFrame, "RIGHT", 0, 0)
+    rosterIlvlBlock:SetSize(rosterBlockW, 24)
+    rosterIlvlBlock:SetFrameLevel(avgFrame:GetFrameLevel() + 1)
+    rosterIlvlBlock:SetBackdrop({
+        bgFile   = "Interface\\ChatFrame\\ChatFrameBackground",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile=true, tileSize=16, edgeSize=8,
+        insets={left=2,right=2,top=2,bottom=2}
+    })
+    rosterIlvlBlock:SetBackdropColor(0.05, 0.07, 0.13, 1)
+    rosterIlvlBlock:SetBackdropBorderColor(0.78, 0.61, 0.23, 1.0)
+    local rosterIlvlLbl = rosterIlvlBlock:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    rosterIlvlLbl:SetAllPoints(rosterIlvlBlock)
+    rosterIlvlLbl:SetJustifyH("CENTER"); rosterIlvlLbl:SetJustifyV("MIDDLE")
+    rosterIlvlLbl:SetText("|cffC69B3ARoster iLvl:|r |cff555555--|r")
+    LichborneRosterIlvlLabel = rosterIlvlLbl
+    rosterIlvlBlock:EnableMouse(true)
+    rosterIlvlBlock:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(rosterIlvlBlock, "ANCHOR_TOP")
+        GameTooltip:AddLine("Roster Avg iLvl", 0.78, 0.61, 0.23)
+        GameTooltip:AddLine("Average item level across your", 1,1,1)
+        GameTooltip:AddLine("entire tracked roster.", 1,1,1)
+        GameTooltip:Show()
+    end)
+    rosterIlvlBlock:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    -- ── Add Target button ──────────────────────────────────────
+    local addBtn = CreateFrame("Button", "LichborneAddTargetBtn", f)
+    addBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 15, 112)
+    addBtn:SetSize(155, 28)
+    addBtn:SetFrameLevel(fl + 12)
+    addBtn:SetBackdrop({
+        bgFile="Interface\\ChatFrame\\ChatFrameBackground",
+        edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",
+        tile=true, tileSize=16, edgeSize=8,
+        insets={left=2,right=2,top=2,bottom=2}
+    })
+    addBtn:SetBackdropColor(0.05, 0.25, 0.30, 1)
+    addBtn:SetBackdropBorderColor(0.78, 0.61, 0.23, 0.9)
+    local addBtnLabel = addBtn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    addBtnLabel:SetAllPoints(addBtn)
+    addBtnLabel:SetJustifyH("CENTER"); addBtnLabel:SetJustifyV("MIDDLE")
+    addBtnLabel:SetText("|cffd4af37+ Add Target|r")
+    addBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight", "ADD")
+
+    local addStatus = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    addStatus:SetPoint("TOPLEFT", f, "TOPLEFT", 15, -618)  -- just above Add Target row
+    addStatus:SetWidth(880)
+    addStatus:SetJustifyH("LEFT")
+    addStatus:SetText("")
+    LichborneAddStatus = addStatus
+
+    addBtn:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(addBtn, "ANCHOR_TOP")
+        GameTooltip:AddLine("Add Target to Tracker", 1, 1, 1)
+        GameTooltip:AddLine("Target a player, then click to", 0.8, 0.8, 0.8)
+        GameTooltip:AddLine("auto-detect class, name & GS", 0.8, 0.8, 0.8)
+        GameTooltip:Show()
+    end)
+    addBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    addBtn:SetScript("OnClick", function()
+        if not UnitExists("target") or not UnitIsPlayer("target") then
+            LichborneAddStatus:SetText("|cffff4444No player targeted.|r")
+            return
+        end
+
+        local targetName = UnitName("target")
+        local _, targetClass = UnitClass("target")
+        local cls = targetClass and CLASS_TOKEN_MAP[targetClass]
+        if not cls then
+            LichborneAddStatus:SetText("|cffff4444Unknown class: "..(targetClass or "nil").."|r")
+            return
+        end
+
+        EnsureClass(cls)
+        local indices = GetAllClassRows(cls)
+        for _, di in ipairs(indices) do
+            local row = LichborneTrackerDB.rows[di]
+            if row.name and row.name:lower() == targetName:lower() then
+                local c = CLASS_COLORS[cls]
+                local hex = string.format("|cff%02x%02x%02x", math.floor(c.r*255), math.floor(c.g*255), math.floor(c.b*255))
+                LichborneAddStatus:SetText(hex..targetName.."|r already in "..cls.." tab.")
+                return
+            end
+        end
+
+        local targetDi = nil
+        local slotNum = 0
+        for _, di in ipairs(indices) do
+            slotNum = slotNum + 1
+            local row = LichborneTrackerDB.rows[di]
+            if not row.name or row.name == "" then
+                targetDi = di
+                break
+            end
+        end
+        if not targetDi then
+            LichborneAddStatus:SetText("|cffff4444"..cls.." tab is full ("..MAX_ROWS*MAX_PAGES.."/"..MAX_ROWS*MAX_PAGES..").|r")
+            return
+        end
+        -- Auto-jump to the page containing the new slot
+        classPage[cls] = math.ceil(slotNum / ROWS_PER_PAGE)
+
+        LichborneTrackerDB.rows[targetDi].name = targetName
+
+        local c = CLASS_COLORS[cls]
+        local hex = string.format("|cff%02x%02x%02x", math.floor(c.r*255), math.floor(c.g*255), math.floor(c.b*255))
+        LichborneAddStatus:SetText("Inspecting "..hex..targetName.."|r ("..cls..")...")
+
+        activeTab = cls
+        UpdateTabs()
+        RefreshRows()
+
+        LichborneInspectTarget = targetDi
+        LichborneSpecTarget = targetDi
+        LichborneInspectUnit = "target"
+        NotifyInspect("target")
+        inspectWait = 0
+
+        DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Adding "..hex..targetName.."|r ("..cls..")...", 1, 0.85, 0)
+    end)
+
+    -- ── Add Group button ───────────────────────────────────────
+    local SetScanActive
+
+    local addGroupBtn = CreateFrame("Button", "LichborneAddGroupBtn", f)
+    addGroupBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 175, 112)
+    addGroupBtn:SetSize(155, 28)
+    addGroupBtn:SetFrameLevel(fl + 12)
+    addGroupBtn:SetBackdrop({
+        bgFile="Interface\\ChatFrame\\ChatFrameBackground",
+        edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",
+        tile=true, tileSize=16, edgeSize=8,
+        insets={left=2,right=2,top=2,bottom=2}
+    })
+    addGroupBtn:SetBackdropColor(0.10*0.35, 0.40*0.35, 0.70*0.35, 1)
+    addGroupBtn:SetBackdropBorderColor(0.78, 0.61, 0.23, 0.9)
+    local addGroupLbl = addGroupBtn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    addGroupLbl:SetAllPoints(addGroupBtn); addGroupLbl:SetJustifyH("CENTER"); addGroupLbl:SetJustifyV("MIDDLE")
+    addGroupLbl:SetText("|cffd4af37+ Add Group|r")
+    addGroupBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight", "ADD")
+    addGroupBtn:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(addGroupBtn, "ANCHOR_TOP")
+        GameTooltip:AddLine("Add Group to Tracker", 1, 1, 1)
+        GameTooltip:AddLine("Scans all players in your party/raid", 0.8, 0.8, 0.8)
+        GameTooltip:AddLine("and adds them to their class tabs.", 0.8, 0.8, 0.8)
+        GameTooltip:AddLine("Skips duplicates automatically.", 0.6, 0.6, 0.6)
+        GameTooltip:Show()
+    end)
+    addGroupBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    addGroupBtn:SetScript("OnClick", function()
+        SetScanActive(true)
+        -- Build list of group members INCLUDING self
+        local members = {}
+        local playerName = UnitName("player")
+        -- Always add self first
+        local _, selfClsKey = UnitClass("player")
+        members[#members+1] = {name=playerName, clsKey=selfClsKey}
+        if GetNumRaidMembers() > 0 then
+            for i = 1, GetNumRaidMembers() do
+                local unit = "raid"..i
+                if UnitExists(unit) and UnitName(unit) ~= playerName then
+                    local name = UnitName(unit)
+                    local _, clsKey = UnitClass(unit)
+                    members[#members+1] = {name=name, clsKey=clsKey}
+                end
+            end
+        elseif GetNumPartyMembers() > 0 then
+            for i = 1, GetNumPartyMembers() do
+                local unit = "party"..i
+                if UnitExists(unit) then
+                    local name = UnitName(unit)
+                    local _, clsKey = UnitClass(unit)
+                    members[#members+1] = {name=name, clsKey=clsKey}
+                end
+            end
+        end
+
+        if #members == 0 then
+            SetScanActive(false)
+            if LichborneAddStatus then
+                LichborneAddStatus:SetText("|cffff4444Not in a group, or no other members found.|r")
+            end
+            return
+        end
+
+        local added, skipped = 0, 0
+        local toProcess = {}
+        for _, m in ipairs(members) do
+            local cls = m.clsKey and CLASS_TOKEN_MAP[m.clsKey]
+            if cls then
+                toProcess[#toProcess+1] = {name=m.name, cls=cls}
+            end
+        end
+
+        if #toProcess == 0 then
+            SetScanActive(false)
+            if LichborneAddStatus then
+                LichborneAddStatus:SetText("|cffff9900Could not determine class for group members.|r")
+            end
+            return
+        end
+
+        -- Process with delay to avoid UI freeze on large groups
+        local idx = 1
+        local waitTime = 0
+        local addGroupFrame = CreateFrame("Frame")
+        SetScanActive(true)
+        addGroupFrame:SetScript("OnUpdate", function(_, elapsed)
+            waitTime = waitTime + elapsed
+            if waitTime < 0.15 then return end  -- small gap between each
+            waitTime = 0
+
+            if idx > #toProcess then
+                addGroupFrame:SetScript("OnUpdate", nil)
+                SetScanActive(false)
+                if LichborneAddStatus then
+                    LichborneAddStatus:SetText("|cff44ff44Added "..added.." new, skipped "..skipped.." duplicates.|r")
+                end
+                DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Group scan complete. Added: "..added..", Skipped: "..skipped, 1, 0.85, 0)
+                RefreshRows()
+                return
+            end
+
+            local m = toProcess[idx]
+            idx = idx + 1
+            local cls = m.cls
+            local name = m.name
+
+            EnsureClass(cls)
+            local indices = GetAllClassRows(cls)
+
+            -- Check for duplicate
+            for _, di in ipairs(indices) do
+                local row = LichborneTrackerDB.rows[di]
+                if row.name and row.name:lower() == name:lower() then
+                    skipped = skipped + 1
+                    return
+                end
+            end
+
+            -- Find empty slot
+            local slot = nil
+            for _, di in ipairs(indices) do
+                local row = LichborneTrackerDB.rows[di]
+                if not row.name or row.name == "" then
+                    slot = di; break
+                end
+            end
+
+            if not slot then
+                skipped = skipped + 1  -- tab full
+                DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r "..cls.." tab full, skipped "..name, 1, 0.5, 0.5)
+                return
+            end
+
+            LichborneTrackerDB.rows[slot].name = name
+            added = added + 1
+
+            local c = CLASS_COLORS[cls]
+            local hex = c and string.format("|cff%02x%02x%02x", math.floor(c.r*255), math.floor(c.g*255), math.floor(c.b*255)) or "|cffffffff"
+            DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Added "..hex..name.."|r ("..cls..")", 1, 0.85, 0)
+        end)
+    end)
+
+    -- ── Shared helper: silently add all group members to tracker ──
+    local function AddGroupMembers(onDone)
+        local playerName = UnitName("player")
+        local members = {}
+        local _, selfClsKey = UnitClass("player")
+        members[#members+1] = {name=playerName, clsKey=selfClsKey}
+        if GetNumRaidMembers() > 0 then
+            for i = 1, GetNumRaidMembers() do
+                local unit = "raid"..i
+                if UnitExists(unit) and UnitName(unit) ~= playerName then
+                    local name2 = UnitName(unit)
+                    local _, clsKey = UnitClass(unit)
+                    members[#members+1] = {name=name2, clsKey=clsKey}
+                end
+            end
+        elseif GetNumPartyMembers() > 0 then
+            for i = 1, GetNumPartyMembers() do
+                local unit = "party"..i
+                if UnitExists(unit) then
+                    local name2 = UnitName(unit)
+                    local _, clsKey = UnitClass(unit)
+                    members[#members+1] = {name=name2, clsKey=clsKey}
+                end
+            end
+        end
+        local toProcess = {}
+        for _, m in ipairs(members) do
+            local cls = m.clsKey and CLASS_TOKEN_MAP[m.clsKey]
+            if cls then toProcess[#toProcess+1] = {name=m.name, cls=cls} end
+        end
+        if #toProcess == 0 then
+            if onDone then onDone(0, 0) end
+            return
+        end
+        local addIdx, addWait, addedCount, skippedCount = 1, 0, 0, 0
+        local agFrame = CreateFrame("Frame")
+        agFrame:SetScript("OnUpdate", function(_, elapsed)
+            addWait = addWait + elapsed
+            if addWait < 0.15 then return end
+            addWait = 0
+            if addIdx > #toProcess then
+                agFrame:SetScript("OnUpdate", nil)
+                RefreshRows()
+                if onDone then onDone(addedCount, skippedCount) end
+                return
+            end
+            local m = toProcess[addIdx]; addIdx = addIdx + 1
+            EnsureClass(m.cls)
+            local indices = GetAllClassRows(m.cls)
+            for _, di in ipairs(indices) do
+                local row = LichborneTrackerDB.rows[di]
+                if row.name and row.name:lower() == m.name:lower() then
+                    skippedCount = skippedCount + 1; return
+                end
+            end
+            local slot = nil
+            for _, di in ipairs(indices) do
+                local row = LichborneTrackerDB.rows[di]
+                if not row.name or row.name == "" then slot = di; break end
+            end
+            if not slot then
+                skippedCount = skippedCount + 1
+                DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r "..m.cls.." tab full, skipped "..m.name, 1, 0.5, 0.5)
+                return
+            end
+            LichborneTrackerDB.rows[slot].name = m.name
+            addedCount = addedCount + 1
+        end)
+    end
+
+    -- ── Helper: make a tracker button ──────────────────────────
+    local function MakeTrackerBtn(name, x, y, w, h, br, bg2, bb, label)
+        local btn = CreateFrame("Button", name, f)
+        btn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", x, y)
+        btn:SetSize(w, h); btn:SetFrameLevel(fl+12)
+        btn:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+        btn:SetBackdropColor(br*0.35,bg2*0.35,bb*0.35,1); btn:SetBackdropBorderColor(0.78,0.61,0.23,0.9)
+        btn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+        local lbl=btn:CreateFontString(nil,"OVERLAY","GameFontNormal"); lbl:SetAllPoints(btn); lbl:SetJustifyH("CENTER"); lbl:SetJustifyV("MIDDLE")
+        lbl:SetText(label)
+        return btn
+    end
+
+    -- ── Update Target GS (row y=78, left) ────────────────────
+    local gsBtn = MakeTrackerBtn("LichborneUpdateGSBtn", 15, 78, 155, 28, 0.20, 0.80, 0.90, "|cffd4af37+ Add Target GS|r")
+    gsBtn:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(gsBtn,"ANCHOR_TOP"); GameTooltip:AddLine("Get Target GS",1,1,1)
+        GameTooltip:AddLine("Target a tracked player to refresh their gear score.",0.8,0.8,0.8)
+        GameTooltip:Show()
+    end)
+    gsBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    gsBtn:SetScript("OnClick", function()
+        if not UnitExists("target") or not UnitIsPlayer("target") then LichborneAddStatus:SetText("|cffff4444No player targeted.|r"); return end
+        local targetName = UnitName("target")
+        local foundDi = nil
+        for i, row in ipairs(LichborneTrackerDB.rows) do
+            if row.name and row.name:lower() == targetName:lower() then foundDi = i; break end
+        end
+        if not foundDi then LichborneAddStatus:SetText("|cffff9900"..targetName.." not found. Use + Add Target first.|r"); return end
+        local rowData = LichborneTrackerDB.rows[foundDi]
+        local c = CLASS_COLORS[rowData.cls or ""]; local hex = c and string.format("|cff%02x%02x%02x",math.floor(c.r*255),math.floor(c.g*255),math.floor(c.b*255)) or "|cffffffff"
+        LichborneAddStatus:SetText("Updating GS for "..hex..targetName.."|r...")
+        LichborneInspectTarget = foundDi; LichborneInspectUnit = "target"
+        NotifyInspect("target"); inspectWait = 0
+        DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Updating GS for "..hex..targetName.."|r...", 1, 0.85, 0)
+    end)
+
+    -- ── Update Target Spec (row y=78, right) ──────────────────
+    local tsBtn = MakeTrackerBtn("LichborneUpdateTargetSpecBtn", 15, 44, 155, 28, 0.20, 0.80, 0.90, "|cffd4af37+ Add Target Spec|r")
+    tsBtn:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(tsBtn,"ANCHOR_TOP"); GameTooltip:AddLine("Get Target Spec",1,1,1)
+        GameTooltip:AddLine("Target a tracked player to read their talent spec.",0.8,0.8,0.8)
+        GameTooltip:Show()
+    end)
+    tsBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    tsBtn:SetScript("OnClick", function()
+        if not UnitExists("target") or not UnitIsPlayer("target") then LichborneAddStatus:SetText("|cffff4444No player targeted.|r"); return end
+        local targetName = UnitName("target")
+        local foundDi = nil
+        for i, row in ipairs(LichborneTrackerDB.rows) do
+            if row.name and row.name:lower() == targetName:lower() then foundDi = i; break end
+        end
+        if not foundDi then LichborneAddStatus:SetText("|cffff9900"..targetName.." not found. Use + Add Target first.|r"); return end
+        local rowData = LichborneTrackerDB.rows[foundDi]
+        local c = CLASS_COLORS[rowData.cls or ""]; local hex = c and string.format("|cff%02x%02x%02x",math.floor(c.r*255),math.floor(c.g*255),math.floor(c.b*255)) or "|cffffffff"
+        LichborneAddStatus:SetText("Reading spec for "..hex..targetName.."|r...")
+        LichborneSpecTarget = foundDi; LichborneInspectUnit = "target"
+        LichborneTrackerDB.rows[foundDi].spec = ""
+        NotifyInspect("target"); specWait = 0
+        DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Reading spec for "..hex..targetName.."|r...", 1, 0.85, 0)
+    end)
+
+    -- ── Update Group GS (row y=44, left) ──────────────────────
+    local activeInspectFrame = nil  -- shared by GS and Spec scans; Stop button kills it
+
+    -- Disable/enable all buttons except Stop during a scan
+    SetScanActive = function(active)
+        SetButtonsLocked(active)
+        -- Also lock invite buttons during scans (they aren't Stop Invite here)
+        local inviteRaid = _G["LichborneInviteRaidBtn"]
+        if inviteRaid then
+            if active then inviteRaid:Disable(); inviteRaid:SetAlpha(0.35)
+            else inviteRaid:Enable(); inviteRaid:SetAlpha(1.0) end
+        end
+        local inviteGroup = _G["LichborneInviteGroupBtn"]
+        if inviteGroup then
+            if active then inviteGroup:Disable(); inviteGroup:SetAlpha(0.35)
+            else inviteGroup:Enable(); inviteGroup:SetAlpha(1.0) end
+        end
+    end
+    local uggsBtn = MakeTrackerBtn("LichborneUpdateGroupGSBtn", 175, 78, 155, 28, 0.10, 0.40, 0.70, "|cffd4af37+ Add Group GS|r")
+    uggsBtn:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(uggsBtn,"ANCHOR_TOP"); GameTooltip:AddLine("Get Group GS",1,1,1)
+        GameTooltip:AddLine("Inspects every tracked group member for gear score.",0.8,0.8,0.8)
+        GameTooltip:AddLine("Allow ~2.5s per player.",0.6,0.6,0.6)
+        GameTooltip:Show()
+    end)
+    uggsBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    uggsBtn:SetScript("OnClick", function()
+        local playerName = UnitName("player")
+        if GetNumRaidMembers() == 0 and GetNumPartyMembers() == 0 then
+            LichborneAddStatus:SetText("|cffff4444Not in a group.|r"); return
+        end
+        SetScanActive(true)
+        LichborneAddStatus:SetText("|cffffff88Adding group members first...|r")
+        AddGroupMembers(function(added, skipped)
+            -- Now build unit list and run GS scan
+            local units = {}
+            units[#units+1] = "player"
+            if GetNumRaidMembers() > 0 then
+                for i = 1, GetNumRaidMembers() do local unit="raid"..i; if UnitExists(unit) and UnitIsPlayer(unit) and UnitName(unit)~=playerName then units[#units+1]=unit end end
+            elseif GetNumPartyMembers() > 0 then
+                for i = 1, GetNumPartyMembers() do local unit="party"..i; if UnitExists(unit) then units[#units+1]=unit end end
+            end
+            if #units == 0 then SetScanActive(false); LichborneAddStatus:SetText("|cffff4444No group members found.|r"); return end
+            local totalTime = math.ceil(#units*2.5)
+            LichborneAddStatus:SetText("|cffff9900Added "..added.." new. Inspecting "..#units.." players (~"..totalTime.."s)...|r")
+            DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Group synced (+"..added.."). Starting GS scan for "..#units.." players...", 1, 0.85, 0)
+            local idx,elapsed,inspecting = 1,0,false
+            local gFrame = CreateFrame("Frame")
+            activeInspectFrame = gFrame
+            gFrame:SetScript("OnUpdate", function(_, delta)
+                elapsed = elapsed + delta
+                if inspecting then if elapsed < 2.5 then return end; inspecting=false; elapsed=0 end
+                if idx > #units then
+                    gFrame:SetScript("OnUpdate",nil)
+                    SetScanActive(false)
+                    LichborneAddStatus:SetText("|cff44ff44Group GS update complete!|r")
+                    DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cff44ff44Group GS update complete.|r", 1, 0.85, 0)
+                    RefreshRows(); return
+                end
+                local unit = units[idx]; if not UnitExists(unit) then idx=idx+1; return end
+                local targetName = UnitName(unit); local foundDi = nil
+                for i, row in ipairs(LichborneTrackerDB.rows) do if row.name and row.name:lower()==targetName:lower() then foundDi=i; break end end
+                if not foundDi then DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Skipping "..tostring(targetName).." (not tracked)",1,0.6,0.3); idx=idx+1; return end
+                LichborneAddStatus:SetText("Updating GS |cffffff88"..tostring(targetName).."|r... ("..(idx).."/"..#units..")")
+                LichborneInspectTarget = foundDi; LichborneInspectUnit = unit
+                NotifyInspect(unit); inspectWait=0; idx=idx+1; inspecting=true; elapsed=0
+            end)
+        end)
+    end)
+
+    -- ── Update Group Spec (row y=44, right) ───────────────────
+    local ugsBtn = MakeTrackerBtn("LichborneUpdateGroupSpecBtn", 175, 44, 155, 28, 0.10, 0.40, 0.70, "|cffd4af37+ Add Group Spec|r")
+    ugsBtn:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(ugsBtn,"ANCHOR_TOP"); GameTooltip:AddLine("Get Group Spec",1,1,1)
+        GameTooltip:AddLine("Reads talent spec for every tracked group member.",0.8,0.8,0.8)
+        GameTooltip:AddLine("Allow ~3s per player.",0.6,0.6,0.6)
+        GameTooltip:Show()
+    end)
+    ugsBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    ugsBtn:SetScript("OnClick", function()
+        local playerName = UnitName("player")
+        if GetNumRaidMembers() == 0 and GetNumPartyMembers() == 0 then
+            LichborneAddStatus:SetText("|cffff4444Not in a group.|r"); return
+        end
+        SetScanActive(true)
+        LichborneAddStatus:SetText("|cffffff88Adding group members first...|r")
+        AddGroupMembers(function(added, skipped)
+            -- Now build unit list and run Spec scan
+            local units = {}
+            units[#units+1] = "player"
+            if GetNumRaidMembers() > 0 then
+                for i = 1, GetNumRaidMembers() do local unit="raid"..i; if UnitExists(unit) and UnitIsPlayer(unit) and UnitName(unit)~=playerName then units[#units+1]=unit end end
+            elseif GetNumPartyMembers() > 0 then
+                for i = 1, GetNumPartyMembers() do local unit="party"..i; if UnitExists(unit) then units[#units+1]=unit end end
+            end
+            if #units == 0 then SetScanActive(false); LichborneAddStatus:SetText("|cffff4444No group members found.|r"); return end
+            local totalTime = math.ceil(#units*3)
+            LichborneAddStatus:SetText("|cffff9900Added "..added.." new. Reading spec for "..#units.." players (~"..totalTime.."s)...|r")
+            DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Group synced (+"..added.."). Starting spec scan for "..#units.." players...", 1, 0.85, 0)
+            local idx,elapsed,inspecting = 1,0,false
+            local sFrame = CreateFrame("Frame")
+            activeInspectFrame = sFrame
+            sFrame:SetScript("OnUpdate", function(_, delta)
+                elapsed = elapsed + delta
+                if inspecting then if elapsed < 3.0 then return end; inspecting=false; elapsed=0 end
+                if idx > #units then
+                    sFrame:SetScript("OnUpdate",nil)
+                    SetScanActive(false)
+                    LichborneAddStatus:SetText("|cff44ff44Group spec update complete!|r")
+                    DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cff44ff44Group spec update complete.|r", 1, 0.85, 0)
+                    RefreshRows(); if raidRowFrames and #raidRowFrames > 0 then RefreshRaidRows() end; return
+                end
+                local unit = units[idx]; if not UnitExists(unit) then idx=idx+1; return end
+                local targetName = UnitName(unit); local foundDi = nil
+                for i, row in ipairs(LichborneTrackerDB.rows) do if row.name and row.name:lower()==targetName:lower() then foundDi=i; break end end
+                if not foundDi then DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Skipping "..tostring(targetName).." (not tracked)",1,0.6,0.3); idx=idx+1; return end
+                LichborneAddStatus:SetText("Reading spec |cffffff88"..tostring(targetName).."|r... ("..(idx).."/"..#units..")")
+                LichborneSpecTarget = foundDi; LichborneInspectUnit = unit
+                if LichborneTrackerDB.rows[foundDi] then LichborneTrackerDB.rows[foundDi].spec="" end
+                NotifyInspect(unit); specWait=0; idx=idx+1; inspecting=true; elapsed=0
+            end)
+        end)
+    end)
+
+    -- ── Stop Inspect button (below Get Group Spec) ────────────
+    local stopInspectBtn = MakeTrackerBtn("LichborneStopInspectBtn", 175, 10, 155, 28, 0.90, 0.20, 0.20, "|cffd4af37Stop|r")
+    stopInspectBtn:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(stopInspectBtn, "ANCHOR_TOP")
+        GameTooltip:AddLine("Stop", 1, 1, 1)
+        GameTooltip:AddLine("Cancels the running GS or Spec scan.", 0.8, 0.8, 0.8)
+        GameTooltip:Show()
+    end)
+    stopInspectBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    stopInspectBtn:SetScript("OnClick", function()
+        if activeInspectFrame then
+            activeInspectFrame:SetScript("OnUpdate", nil)
+            activeInspectFrame = nil
+        end
+        SetScanActive(false)
+        LichborneAddStatus:SetText("|cffff4444Scan stopped.|r")
+        DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cffff4444Scan stopped.|r", 1, 0.85, 0)
+    end)
+
+    -- Row y=10: Add Target / Add Group (existing buttons stay here)
+    -- Avg GS bar (repurposed from Count bar)
+    local clsFrame = CreateFrame("Frame", "LichborneClassBar", f)
+    LichborneCountBar = clsFrame
+    clsFrame:SetPoint("TOPLEFT", f, "TOPLEFT", 15, -584)
+    clsFrame:SetSize(1086, 24)
+    clsFrame:SetFrameLevel(fl + 10)
+    local clsbg = clsFrame:CreateTexture(nil, "BACKGROUND")
+    clsbg:SetAllPoints(clsFrame); clsbg:SetTexture(0.05, 0.07, 0.13, 1)
+    local clsTitle = clsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    clsTitle:SetPoint("LEFT", clsFrame, "LEFT", 4, 0)
+    clsTitle:SetText("|cffC69B3AAvg GS:|r"); clsTitle:SetWidth(52)
+    LichborneCountLabels = {}
+    local cRosterBlockW = 130
+    local cswTotalW = 1086 - 56 - 4 - cRosterBlockW
+    local cswW = cswTotalW / 10
+    local cswIdx = 0
+    for i, cls in ipairs(CLASS_TABS) do
+        if cls == "Raid" or cls == "All" then break end
+        cswIdx = cswIdx + 1
+        local c = CLASS_COLORS[cls]
+        local csw = CreateFrame("Button", "LichborneClassSwatch"..cswIdx, clsFrame)
+        csw:SetSize(cswW - 2, 20)
+        csw:SetPoint("LEFT", clsFrame, "LEFT", 56 + (cswIdx-1)*cswW, 0)
+        csw:SetFrameLevel(clsFrame:GetFrameLevel() + 1)
+        local cswbg = csw:CreateTexture(nil, "BACKGROUND")
+        cswbg:SetAllPoints(csw); cswbg:SetTexture(0.08, 0.10, 0.18, 1); csw.bg = cswbg
+        local hex = string.format("|cff%02x%02x%02x", math.floor(c.r*255), math.floor(c.g*255), math.floor(c.b*255))
+        local lbl = csw:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        lbl:SetAllPoints(csw); lbl:SetJustifyH("CENTER"); lbl:SetJustifyV("MIDDLE")
+        lbl:SetText(hex..(TAB_LABELS[cls])..": |cff555555--|r"); csw.lbl = lbl; csw.cls = cls
+        LichborneCountLabels[cls] = lbl
+        csw:EnableMouse(true)
+        csw:SetScript("OnEnter", function()
+            GameTooltip:SetOwner(csw, "ANCHOR_TOP")
+            local gs = GetClassAvgGS(cls)
+            GameTooltip:AddLine(TAB_LABELS[cls], c.r, c.g, c.b)
+            GameTooltip:AddLine("Average gear score of all tracked "..TAB_LABELS[cls].."s.", 1,1,1)
+            if gs > 0 then
+                GameTooltip:AddLine("Current: |cffd4af37"..gs.."|r", 1,1,1)
+            else
+                GameTooltip:AddLine("No gear data yet.", 0.6,0.6,0.6)
+            end
+            GameTooltip:AddLine("Click to switch to this tab.", 0.5,0.5,0.5)
+            GameTooltip:Show()
+        end)
+        csw:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        csw:SetScript("OnClick", function()
+            activeTab = cls
+            UpdateTabs()
+            RefreshRows()
+        end)
+    end
+
+    -- Roster GS block — right-anchored, gold border, fills remaining space
+    local rosterGsBlock = CreateFrame("Frame", "LichborneRosterGsBlock", clsFrame)
+    rosterGsBlock:SetPoint("RIGHT", clsFrame, "RIGHT", 0, 0)
+    rosterGsBlock:SetSize(cRosterBlockW, 24)
+    rosterGsBlock:SetFrameLevel(clsFrame:GetFrameLevel() + 1)
+    rosterGsBlock:SetBackdrop({
+        bgFile   = "Interface\\ChatFrame\\ChatFrameBackground",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile=true, tileSize=16, edgeSize=8,
+        insets={left=2,right=2,top=2,bottom=2}
+    })
+    rosterGsBlock:SetBackdropColor(0.05, 0.07, 0.13, 1)
+    rosterGsBlock:SetBackdropBorderColor(0.78, 0.61, 0.23, 1.0)
+    local rosterGsLbl = rosterGsBlock:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    rosterGsLbl:SetAllPoints(rosterGsBlock)
+    rosterGsLbl:SetJustifyH("CENTER"); rosterGsLbl:SetJustifyV("MIDDLE")
+    rosterGsLbl:SetText("|cffC69B3ARoster GS:|r |cff555555--|r")
+    LichborneRosterGsLabel = rosterGsLbl
+    rosterGsBlock:EnableMouse(true)
+    rosterGsBlock:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(rosterGsBlock, "ANCHOR_TOP")
+        GameTooltip:AddLine("Roster Avg GS", 0.78, 0.61, 0.23)
+        GameTooltip:AddLine("Average gear score across your", 1,1,1)
+        GameTooltip:AddLine("entire tracked roster.", 1,1,1)
+        GameTooltip:Show()
+    end)
+    rosterGsBlock:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    -- Build raid frame
+    BuildRaidFrame(f, fl)
+    BuildAllFrame(f, fl)
+
+
+    -- ── Playerbot section ─────────────────────────────────────
+    -- Border frame styled like the title bar
+    -- ── Bot buttons (left column, no border) ─────────────────
+    local function MakeSimpleBtn(name, label, r, g, b, x, y, w, tooltip)
+        local btn = CreateFrame("Button", name, f)
+        btn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", x, y)
+        btn:SetSize(w or 185, 28)
+        btn:SetFrameLevel(fl + 12)
+        btn:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+        btn:SetBackdropColor(r*0.3, g*0.3, b*0.3, 1)
+        btn:SetBackdropBorderColor(0.78, 0.61, 0.23, 0.9)
+        btn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight", "ADD")
+        local lbl = btn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        lbl:SetAllPoints(btn); lbl:SetJustifyH("CENTER"); lbl:SetJustifyV("MIDDLE")
+        lbl:SetText(label)
+        if tooltip then
+            btn:SetScript("OnEnter", function()
+                GameTooltip:SetOwner(btn, "ANCHOR_TOP")
+                for _, line in ipairs(tooltip) do
+                    GameTooltip:AddLine(line[1], line[2] or 1, line[3] or 1, line[4] or 1)
+                end
+                GameTooltip:Show()
+            end)
+            btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        end
+        return btn
+    end
+
+    local maintBtn = MakeSimpleBtn("LichborneMaintBtn", "|cffd4af37Maintenance|r",
+        0.2, 0.5, 0.9, 335, 112,
+        nil, {{"Maintenance",1,1,1},{"Says 'maintenance' in group chat.",0.8,0.8,0.8},{"Bots learn spells, repair, enchant.",0.6,0.6,0.6}})
+    maintBtn:SetScript("OnClick", function() SendChatMessage("maintenance", "PARTY") end)
+
+    local autogearBtn = MakeSimpleBtn("LichborneAutogearBtn", "|cffd4af37AutoGear|r",
+        0.2, 0.5, 0.9, 335, 78,
+        nil, {{"AutoGear",1,1,1},{"Says 'autogear' in group chat.",0.8,0.8,0.8},{"Bots equip best available gear.",0.6,0.6,0.6}})
+    autogearBtn:SetScript("OnClick", function() SendChatMessage("autogear", "PARTY") end)
+
+    local loginBtn = MakeSimpleBtn("LichborneLoginBtn", "|cffd4af37Login All Bots|r",
+        0.1, 0.6, 0.2, 335, 44,
+        nil, {{"Login All Bots",1,1,1},{".playerbots bot add *",0.8,0.8,0.8}})
+    loginBtn:SetScript("OnClick", function() SendChatMessage(".playerbots bot add *", "PARTY") end)
+
+    local logoutBtn = MakeSimpleBtn("LichborneLogoutBtn", "|cffd4af37Logout All Bots|r",
+        0.90, 0.20, 0.20, 335, 10,
+        nil, {{"Logout All Bots",1,1,1},{".playerbots bot remove *",0.8,0.8,0.8}})
+    logoutBtn:SetScript("OnClick", function() SendChatMessage(".playerbots bot remove *", "PARTY") end)
+
+    -- ── Disband Group/Raid button ──────────────────────────────
+    local disbandBtn = CreateFrame("Button", "LichborneDisbandBtn", f)
+    disbandBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 15, 10)
+    disbandBtn:SetSize(155, 28)
+    disbandBtn:SetFrameLevel(fl + 12)
+    disbandBtn:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+    disbandBtn:SetBackdropColor(0.90*0.35, 0.20*0.35, 0.20*0.35, 1)
+    disbandBtn:SetBackdropBorderColor(0.78, 0.61, 0.23, 0.9)
+    disbandBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight", "ADD")
+    local disbandLbl = disbandBtn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    disbandLbl:SetAllPoints(disbandBtn); disbandLbl:SetJustifyH("CENTER"); disbandLbl:SetJustifyV("MIDDLE")
+    disbandLbl:SetText("|cffd4af37Disband Group / Raid|r")
+    disbandBtn:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(disbandBtn, "ANCHOR_TOP")
+        GameTooltip:AddLine("Disband Group / Raid", 1, 1, 1)
+        GameTooltip:AddLine("Kicks all members and disbands.", 0.8, 0.8, 0.8)
+        GameTooltip:Show()
+    end)
+    disbandBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    -- Confirmation dialog
+    local disbConfirm = CreateFrame("Frame", nil, UIParent)
+    disbConfirm:SetSize(260, 80)
+    disbConfirm:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+    disbConfirm:SetFrameStrata("FULLSCREEN_DIALOG")
+    disbConfirm:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=3,right=3,top=3,bottom=3}})
+    disbConfirm:SetBackdropColor(0.04, 0.06, 0.13, 0.98)
+    disbConfirm:SetBackdropBorderColor(0.90, 0.20, 0.20, 1)
+    disbConfirm:Hide()
+
+    local disbText = disbConfirm:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    disbText:SetPoint("TOP", disbConfirm, "TOP", 0, -12)
+    disbText:SetText("|cffd4af37Disband Group / Raid?|r")
+    local disbSub = disbConfirm:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    disbSub:SetPoint("TOP", disbText, "BOTTOM", 0, -4)
+    disbSub:SetText("|cffaaaaaaKicks all members and leaves the group.|r")
+
+    local disbYes = CreateFrame("Button", nil, disbConfirm)
+    disbYes:SetSize(100, 22); disbYes:SetPoint("BOTTOMLEFT", disbConfirm, "BOTTOMLEFT", 12, 10)
+    disbYes:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+    disbYes:SetBackdropColor(0.32, 0.07, 0.07, 1); disbYes:SetBackdropBorderColor(0.78, 0.61, 0.23, 0.9)
+    disbYes:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight", "ADD")
+    local disbYesLbl = disbYes:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    disbYesLbl:SetAllPoints(disbYes); disbYesLbl:SetJustifyH("CENTER")
+    disbYesLbl:SetText("|cffd4af37Yes, Disband|r")
+
+    local disbNo = CreateFrame("Button", nil, disbConfirm)
+    disbNo:SetSize(100, 22); disbNo:SetPoint("BOTTOMRIGHT", disbConfirm, "BOTTOMRIGHT", -12, 10)
+    disbNo:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+    disbNo:SetBackdropColor(0.08, 0.10, 0.18, 1); disbNo:SetBackdropBorderColor(0.78, 0.61, 0.23, 0.9)
+    disbNo:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight", "ADD")
+    local disbNoLbl = disbNo:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    disbNoLbl:SetAllPoints(disbNo); disbNoLbl:SetJustifyH("CENTER")
+    disbNoLbl:SetText("|cffd4af37Cancel|r")
+
+    disbNo:SetScript("OnClick", function() disbConfirm:Hide() end)
+
+    disbYes:SetScript("OnClick", function()
+        disbConfirm:Hide()
+        SetButtonsLocked(true)
+        -- Also lock Stop and Invite Raid/Group during disband
+        local function lockExtra(locked)
+            for _, n in ipairs({"LichborneStopInspectBtn","LichborneInviteRaidBtn","LichborneInviteGroupBtn"}) do
+                local b = _G[n]
+                if b then
+                    if locked then b:Disable(); b:SetAlpha(0.35)
+                    else b:Enable(); b:SetAlpha(1.0) end
+                end
+            end
+        end
+        lockExtra(true)
+        local playerName = UnitName("player")
+        local members = {}
+        if GetNumRaidMembers() > 0 then
+            for i = 1, GetNumRaidMembers() do
+                local unit = "raid"..i
+                if UnitExists(unit) then
+                    local name = UnitName(unit)
+                    if name and name ~= playerName then members[#members+1] = name end
+                end
+            end
+        elseif GetNumPartyMembers() > 0 then
+            for i = 1, GetNumPartyMembers() do
+                local unit = "party"..i
+                if UnitExists(unit) then
+                    local name = UnitName(unit)
+                    if name and name ~= playerName then members[#members+1] = name end
+                end
+            end
+        end
+        if #members == 0 then
+            LeaveParty()
+            SetButtonsLocked(false)
+            lockExtra(false)
+            DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cffd4af37Group disbanded.|r", 1, 0.85, 0)
+            return
+        end
+        DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cffd4af37Disbanding - kicking " .. #members .. " members...|r", 1, 0.85, 0)
+        local idx = 1
+        local waited = 0
+        local phase = "kick"
+        local disbFrame = CreateFrame("Frame")
+        disbFrame:SetScript("OnUpdate", function(_, elapsed)
+            waited = waited + elapsed
+            if phase == "kick" then
+                if waited < 0.2 then return end
+                waited = 0
+                if idx > #members then phase = "leave"; waited = 0; return end
+                local name = members[idx]
+                SendChatMessage(".playerbots bot remove " .. name, "SAY")
+                UninviteUnit(name)
+                idx = idx + 1
+            elseif phase == "leave" then
+                if waited < 1.0 then return end
+                LeaveParty()
+                SetButtonsLocked(false)
+                lockExtra(false)
+                DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cffd4af37All members kicked. Group disbanded.|r", 1, 0.85, 0)
+                disbFrame:SetScript("OnUpdate", nil)
+            end
+        end)
+    end)
+
+    disbandBtn:SetScript("OnClick", function()
+        disbConfirm:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+        disbConfirm:Show()
+    end)
+
+    -- ── Version / Info box (right of Stop Invite) ─────────────
+    local infoBox = CreateFrame("Frame", nil, f)
+    infoBox:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 895, 10)
+    infoBox:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -17, 10)
+    infoBox:SetHeight(130)
+    infoBox:SetFrameLevel(fl + 11)
+    infoBox:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+    infoBox:SetBackdropColor(0, 0, 0, 0)
+    infoBox:SetBackdropBorderColor(0.78, 0.61, 0.23, 0.9)
+    local infoText = infoBox:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    infoText:SetPoint("CENTER", infoBox, "CENTER", 0, 0)
+    infoText:SetWidth(190)
+    infoText:SetJustifyH("CENTER"); infoText:SetJustifyV("MIDDLE")
+    infoText:SetText(
+        "|cffd4af37LICHBORNE|r\n" ..
+        "|cffd4af37Gear Tracker & Raid Planner|r\n" ..
+        "|cffd4af37v1.76|r\n" ..
+        "\n" ..
+        "|cffaaaaaaQuestions & Support:|r\n" ..
+        "|cffd4af37lichborne.wow|r\n" ..
+        "|cffd4af37@proton.me|r"
+    )
+
+end
+
+UpdateSummary = function()
+    if not LichborneAvgSwatches then return end
+    for _, sw in ipairs(LichborneAvgSwatches) do
+        local cls = sw.cls
+        if cls == "Raid" then break end
+        local avg = GetClassAvgIlvl(cls)
+        local c = CLASS_COLORS[cls]
+        if not c then break end
+        local hex = string.format("|cff%02x%02x%02x", math.floor(c.r*255), math.floor(c.g*255), math.floor(c.b*255))
+        sw.bg:SetTexture(0.08, 0.10, 0.18, 1)
+        if avg > 0 then
+            sw.lbl:SetText(hex..(TAB_LABELS[cls])..": |cffff8000"..avg.."|r")
+        else
+            sw.lbl:SetText(hex..(TAB_LABELS[cls])..": |cff555555--|r")
+        end
+    end
+    -- Update Avg GS bar
+    if LichborneCountLabels then
+        local classIndex = {["Death Knight"]=1,["Druid"]=2,["Hunter"]=3,["Mage"]=4,["Paladin"]=5,["Priest"]=6,["Rogue"]=7,["Shaman"]=8,["Warlock"]=9,["Warrior"]=10}
+        for cls, lbl in pairs(LichborneCountLabels) do
+            local c = CLASS_COLORS[cls]
+            if not c then break end
+            local hex = string.format("|cff%02x%02x%02x", math.floor(c.r*255), math.floor(c.g*255), math.floor(c.b*255))
+            local gs = GetClassAvgGS(cls)
+            if gs > 0 then
+                lbl:SetText(hex..(TAB_LABELS[cls])..": |cffff8000"..gs.."|r")
+            else
+                lbl:SetText(hex..(TAB_LABELS[cls])..": |cff555555--|r")
+            end
+            local sw = _G["LichborneClassSwatch"..classIndex[cls]]
+            if sw and sw.bg then
+                sw.bg:SetTexture(0.08, 0.10, 0.18, 1)
+            end
+        end
+    end
+    -- Update Roster iLvl and Roster GS blocks
+    if LichborneRosterIlvlLabel then
+        local rIlvl = GetRosterAvgIlvl()
+        if rIlvl > 0 then
+            LichborneRosterIlvlLabel:SetText("|cffC69B3ARoster iLvl:|r |cffff8000"..rIlvl.."|r")
+        else
+            LichborneRosterIlvlLabel:SetText("|cffC69B3ARoster iLvl:|r |cff555555--|r")
+        end
+    end
+    if LichborneRosterGsLabel then
+        local rGs = GetRosterAvgGS()
+        if rGs > 0 then
+            LichborneRosterGsLabel:SetText("|cffC69B3ARoster GS:|r |cffff8000"..rGs.."|r")
+        else
+            LichborneRosterGsLabel:SetText("|cffC69B3ARoster GS:|r |cff555555--|r")
+        end
+    end
+end
+
+-- ── Open ──────────────────────────────────────────────────────
+local frameBgBuilt = false
+local function BuildFrameBG()
+    if frameBgBuilt then return end
+    frameBgBuilt = true
+    local f = LichborneTrackerFrame
+    f:SetBackdrop({
+        bgFile="Interface\\ChatFrame\\ChatFrameBackground",
+        edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",
+        tile=true, tileSize=16, edgeSize=16,
+        insets={left=3,right=3,top=3,bottom=3}
+    })
+    f:SetBackdropColor(0.04, 0.06, 0.13, 1.0)
+    f:SetBackdropBorderColor(0.78, 0.61, 0.23, 1.0)
+    local titleBg = f:CreateTexture(nil, "ARTWORK")
+    titleBg:SetPoint("TOPLEFT", f, "TOPLEFT", 3, -3)
+    titleBg:SetPoint("TOPRIGHT", f, "TOPRIGHT", -3, -3)
+    titleBg:SetHeight(30)
+    titleBg:SetTexture(0.06, 0.09, 0.20, 1)
+    local divider = f:CreateTexture(nil, "ARTWORK")
+    divider:SetPoint("TOPLEFT", f, "TOPLEFT", 3, -33)
+    divider:SetPoint("TOPRIGHT", f, "TOPRIGHT", -3, -33)
+    divider:SetHeight(2)
+    divider:SetTexture(0.78, 0.61, 0.23, 1)
+    local title = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    title:SetPoint("TOPLEFT", f, "TOPLEFT", 10, -12)
+    title:SetPoint("TOPRIGHT", f, "TOPRIGHT", -280, -12)
+    title:SetJustifyH("LEFT")
+    title:SetText("|cffC69B3ALICHBORNE|r  —  Gear Tracker  |cffaaaaaa v1.76|r")
+    local closeBtn = CreateFrame("Button", "LichborneCloseBtn", f, "UIPanelCloseButton")
+    closeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", 2, 2)
+    closeBtn:SetScript("OnClick", function() f:Hide() end)
+
+    -- Close all dropdown menus when the frame hides (ESC key or close button)
+    f:SetScript("OnHide", function()
+        if _G["LichborneRaidTierMenu"]  then _G["LichborneRaidTierMenu"]:Hide()  end
+        if _G["LichborneRaidRaidMenu"]  then _G["LichborneRaidRaidMenu"]:Hide()  end
+        if _G["LichborneRaidGroupMenu"] then _G["LichborneRaidGroupMenu"]:Hide() end
+        if _G["LichbornePageDDMenu"]    then _G["LichbornePageDDMenu"]:Hide()    end
+        if _G["LichborneAllGroupMenu"]  then _G["LichborneAllGroupMenu"]:Hide()  end
+        if LichborneSpecMenu            then LichborneSpecMenu:Hide()            end
+        CloseAllSortMenus()
+    end)
+
+    -- ── Danger zone buttons (far right of title bar) ──────────
+    local function MakeDangerConfirm(title2, lines, onConfirm)
+        local cf = CreateFrame("Frame", nil, UIParent)
+        cf:SetFrameStrata("FULLSCREEN_DIALOG")
+        cf:SetSize(340, 130)
+        cf:SetPoint("CENTER", UIParent, "CENTER", 0, 60)
+        cf:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=4,right=4,top=4,bottom=4}})
+        cf:SetBackdropColor(0.08,0.04,0.04,0.98)
+        cf:SetBackdropBorderColor(0.90,0.20,0.20,1)
+        cf:Hide()
+
+        local hdr = cf:CreateFontString(nil,"OVERLAY","GameFontNormal")
+        hdr:SetPoint("TOP",cf,"TOP",0,-12)
+        hdr:SetText("|cffff4444"..title2.."|r")
+
+        local sub = cf:CreateFontString(nil,"OVERLAY","GameFontNormalSmall")
+        sub:SetPoint("TOP",hdr,"BOTTOM",0,-4); sub:SetWidth(310)
+        sub:SetText("|cffaaaaaa"..lines.."|r")
+
+        local yBtn = CreateFrame("Button",nil,cf)
+        yBtn:SetSize(140,26); yBtn:SetPoint("BOTTOMLEFT",cf,"BOTTOMLEFT",12,10)
+        yBtn:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+        yBtn:SetBackdropColor(0.35,0.04,0.04,1); yBtn:SetBackdropBorderColor(1,0.2,0.2,0.9)
+        yBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+        local yLbl=yBtn:CreateFontString(nil,"OVERLAY","GameFontNormal"); yLbl:SetAllPoints(yBtn); yLbl:SetJustifyH("CENTER")
+        yLbl:SetText("|cffff5555Yes, wipe it all|r")
+        yBtn:SetScript("OnClick",function() onConfirm(); cf:Hide() end)
+
+        local nBtn = CreateFrame("Button",nil,cf)
+        nBtn:SetSize(140,26); nBtn:SetPoint("BOTTOMRIGHT",cf,"BOTTOMRIGHT",-12,10)
+        nBtn:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+        nBtn:SetBackdropColor(0.04,0.15,0.04,1); nBtn:SetBackdropBorderColor(0.2,0.8,0.2,0.9)
+        nBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+        local nLbl=nBtn:CreateFontString(nil,"OVERLAY","GameFontNormal"); nLbl:SetAllPoints(nBtn); nLbl:SetJustifyH("CENTER")
+        nLbl:SetText("|cff44ff44Keep my data|r")
+        nBtn:SetScript("OnClick",function() cf:Hide() end)
+        return cf
+    end
+
+    -- Confirm: Clear ALL data (characters + all raids)
+    local confirmAll = MakeDangerConfirm(
+        "⚠  Wipe Entire Database?",
+        "This permanently deletes ALL tracked characters,\ngear data, raid rosters, and the All list.",
+        function()
+            LichborneTrackerDB.rows = {}
+            LichborneTrackerDB.raidRosters = {}
+            LichborneTrackerDB.needs = {}
+            LichborneTrackerDB.allGroups = {A={}, B={}, C={}}
+            for _, g in ipairs({"A", "B", "C"}) do
+                for i=1,60 do
+                    LichborneTrackerDB.allGroups[g][i] = {name="",cls="",spec="",gs=0,realGs=0}
+                end
+            end
+            LichborneTrackerDB.raidName = "Molten Core"
+            LichborneTrackerDB.raidSize = 40
+            LichborneTrackerDB.raidTier = 1
+            LichborneTrackerDB.raidGroup = "A"
+            DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cffff4444All data wiped.|r", 1, 0.5, 0.5)
+            RefreshRows()
+            if LichborneAllFrame then RefreshAllRows() end
+            if raidRowFrames and #raidRowFrames > 0 then RefreshRaidRows() end
+        end
+    )
+
+    -- Confirm: Clear all raid rosters only
+    local confirmRaids = MakeDangerConfirm(
+        "⚠  Wipe All Raid Rosters?",
+        "This clears every raid roster (all tiers, raids,\nand groups A/B/C). Characters remain in class tabs.",
+        function()
+            LichborneTrackerDB.raidRosters = {}
+            DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cffff9900All raid rosters cleared.|r", 1, 0.7, 0)
+            if raidRowFrames and #raidRowFrames > 0 then RefreshRaidRows() end
+        end
+    )
+
+    -- Clear Raids button (now on LEFT)
+    local clrRaidsBtn = CreateFrame("Button", nil, f)
+    clrRaidsBtn:SetSize(100, 20)
+    clrRaidsBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -166, -8)
+    clrRaidsBtn:SetFrameLevel(f:GetFrameLevel()+10)
+    clrRaidsBtn:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+    clrRaidsBtn:SetBackdropColor(0.30,0.04,0.04,1); clrRaidsBtn:SetBackdropBorderColor(0.78,0.61,0.23,0.9)
+    clrRaidsBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+    local clrRaidsLbl=clrRaidsBtn:CreateFontString(nil,"OVERLAY","GameFontNormalSmall"); clrRaidsLbl:SetAllPoints(clrRaidsBtn); clrRaidsLbl:SetJustifyH("CENTER")
+    clrRaidsLbl:SetText("|cffd4af37Clear Raids|r")
+    clrRaidsBtn:SetScript("OnEnter",function()
+        GameTooltip:SetOwner(clrRaidsBtn,"ANCHOR_BOTTOM")
+        GameTooltip:AddLine("Clear All Raid Rosters",1,0.5,0.5)
+        GameTooltip:AddLine("Wipes every raid group across all tiers.",0.8,0.8,0.8)
+        GameTooltip:AddLine("Character data is NOT affected.",0.6,0.8,0.6)
+        GameTooltip:Show()
+    end)
+    clrRaidsBtn:SetScript("OnLeave",function() GameTooltip:Hide() end)
+    clrRaidsBtn:SetScript("OnClick",function() confirmRaids:Show() end)
+
+    -- Clear All button
+    local clrAllBtn = CreateFrame("Button", nil, f)
+    clrAllBtn:SetSize(100, 20)
+    clrAllBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -62, -8)
+    clrAllBtn:SetFrameLevel(f:GetFrameLevel()+10)
+    clrAllBtn:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+    clrAllBtn:SetBackdropColor(0.30,0.04,0.04,1); clrAllBtn:SetBackdropBorderColor(0.78,0.61,0.23,0.9)
+    clrAllBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight","ADD")
+    local clrAllLbl=clrAllBtn:CreateFontString(nil,"OVERLAY","GameFontNormalSmall"); clrAllLbl:SetAllPoints(clrAllBtn); clrAllLbl:SetJustifyH("CENTER")
+    clrAllLbl:SetText("|cffd4af37Clear All Data|r")
+    clrAllBtn:SetScript("OnEnter",function()
+        GameTooltip:SetOwner(clrAllBtn,"ANCHOR_BOTTOM")
+        GameTooltip:AddLine("Wipe Entire Database",1,0.3,0.3)
+        GameTooltip:AddLine("Permanently deletes ALL characters,",0.8,0.8,0.8)
+        GameTooltip:AddLine("gear data, raid rosters, and the All list.",0.8,0.8,0.8)
+        GameTooltip:AddLine("|cffff4444This cannot be undone.|r",1,0.4,0.4)
+        GameTooltip:Show()
+    end)
+    clrAllBtn:SetScript("OnLeave",function() GameTooltip:Hide() end)
+    clrAllBtn:SetScript("OnClick",function() confirmAll:Show() end)
+end
+
+function LichborneTracker_Open()
+    if not activeTab then activeTab = "All" end
+    BuildFrameBG()
+    OnFirstShow()
+    LichborneTrackerFrame:Show()
+    UpdateTabs()
+    RefreshRows()
+end
+
+-- ── Minimap button (standalone – zero library dependency) ──────────────────
+-- Built entirely with standard WoW frame API.  Position is saved in
+-- LichborneMinimapIconDB.minimapPos (degrees, 0-360) and restored at login.
+local minimapBtn = CreateFrame("Button", "LichborneMinimapButton", Minimap)
+minimapBtn:SetWidth(31); minimapBtn:SetHeight(31)
+minimapBtn:SetFrameStrata("MEDIUM")
+minimapBtn:SetFrameLevel(8)
+minimapBtn:RegisterForClicks("anyUp")
+minimapBtn:RegisterForDrag("LeftButton")
+minimapBtn:SetHighlightTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
+
+do
+    local overlay = minimapBtn:CreateTexture(nil, "OVERLAY")
+    overlay:SetWidth(53); overlay:SetHeight(53)
+    overlay:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+    overlay:SetPoint("TOPLEFT")
+
+    local bg = minimapBtn:CreateTexture(nil, "BACKGROUND")
+    bg:SetWidth(20); bg:SetHeight(20)
+    bg:SetTexture("Interface\\Minimap\\UI-Minimap-Background")
+    bg:SetPoint("TOPLEFT", 7, -5)
+
+    local icon = minimapBtn:CreateTexture(nil, "ARTWORK")
+    icon:SetWidth(20); icon:SetHeight(20)
+    icon:SetTexture("Interface\\Icons\\INV_Misc_Book_11")
+    icon:SetTexCoord(0.05, 0.95, 0.05, 0.95)
+    icon:SetPoint("TOPLEFT", 7, -5)
+    minimapBtn.icon = icon
+end
+
+local function LichborneUpdateMinimapPos()
+    local angle = math.rad(
+        (LichborneMinimapIconDB and LichborneMinimapIconDB.minimapPos) or 225
+    )
+    minimapBtn:ClearAllPoints()
+    minimapBtn:SetPoint("CENTER", Minimap, "CENTER",
+        math.cos(angle) * 80, math.sin(angle) * 80)
+end
+
+minimapBtn:SetScript("OnClick", function(self, btn)
+    if LichborneTrackerFrame and LichborneTrackerFrame:IsShown() then
+        LichborneTrackerFrame:Hide()
+    else
+        LichborneTracker_Open()
+    end
+end)
+
+minimapBtn:SetScript("OnDragStart", function(self)
+    self.icon:SetTexCoord(0, 1, 0, 1)
+    self:LockHighlight()
+    self:SetScript("OnUpdate", function(self)
+        local mx, my = Minimap:GetCenter()
+        local px, py = GetCursorPosition()
+        local scale = Minimap:GetEffectiveScale()
+        px, py = px / scale, py / scale
+        if LichborneMinimapIconDB then
+            LichborneMinimapIconDB.minimapPos =
+                math.deg(math.atan2(py - my, px - mx)) % 360
+        end
+        LichborneUpdateMinimapPos()
+    end)
+end)
+
+minimapBtn:SetScript("OnDragStop", function(self)
+    self:SetScript("OnUpdate", nil)
+    self:UnlockHighlight()
+    self.icon:SetTexCoord(0.05, 0.95, 0.05, 0.95)
+end)
+
+minimapBtn:SetScript("OnEnter", function(self)
+    GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+    GameTooltip:AddLine("|cffC69B3ALichborne Gear Tracker|r")
+    GameTooltip:AddLine("Click to open / close", 1, 1, 1)
+    GameTooltip:AddLine("Drag to reposition", 0.7, 0.7, 0.7)
+    GameTooltip:Show()
+end)
+
+minimapBtn:SetScript("OnLeave", function(self)
+    GameTooltip:Hide()
+end)
+
+minimapBtn:Hide()  -- hidden until PLAYER_LOGIN positions it
+
+-- ── Initialization ────────────────────────────────────────────
+-- ESC key support: insert into UISpecialFrames at Lua load time so WoW hides the
+-- frame when ESC is pressed (same pattern used by DBM).
+table.insert(_G["UISpecialFrames"], "LichborneTrackerFrame")
+
+do
+    local initFrame = CreateFrame("Frame")
+    initFrame:RegisterEvent("ADDON_LOADED")
+    initFrame:RegisterEvent("PLAYER_LOGIN")
+    initFrame:SetScript("OnEvent", function(self, event, addonName)
+        if event == "ADDON_LOADED" and addonName == "LichborneTracker" then
+            -- DB migration and roster repair run at ADDON_LOADED so SavedVars
+            -- are available as early as possible.
+            MigrateGearField()
+            -- Repair all raid rosters: fill any nil/missing slots
+            if LichborneTrackerDB and LichborneTrackerDB.raidRosters then
+                for key, roster in pairs(LichborneTrackerDB.raidRosters) do
+                    if type(roster) == "table" then
+                        for i = 1, MAX_RAID_SLOTS do
+                            if not roster[i] or type(roster[i]) ~= "table" then
+                                roster[i] = {name="",cls="",spec="",gs=0,realGs=0,role="",notes=""}
+                            else
+                                if roster[i].role == nil then roster[i].role = "" end
+                                if roster[i].notes == nil then roster[i].notes = "" end
+                                if roster[i].name == nil then roster[i].name = "" end
+                                if roster[i].cls == nil then roster[i].cls = "" end
+                                if roster[i].spec == nil then roster[i].spec = "" end
+                                if roster[i].gs == nil then roster[i].gs = 0 end
+                                if roster[i].realGs == nil then roster[i].realGs = 0 end
+                            end
+                        end
+                    end
+                end
+            end
+        elseif event == "PLAYER_LOGIN" then
+            -- Position and show the minimap button now that SavedVars are loaded.
+            self:UnregisterEvent("PLAYER_LOGIN")
+            if type(LichborneMinimapIconDB) ~= "table" then
+                LichborneMinimapIconDB = {}
+            end
+            if not LichborneMinimapIconDB.minimapPos then
+                LichborneMinimapIconDB.minimapPos = 225
+            end
+            LichborneUpdateMinimapPos()
+            if not LichborneMinimapIconDB.hide then
+                minimapBtn:Show()
+            end
+        end
+    end)
+end
+
+-- ── Spec / Talent handler ─────────────────────────────────────
+LichborneSpecTarget = nil
+local specRetries = 0
+local MAX_SPEC_RETRIES = 3
+
+local function CalcSpec()
+    local di = LichborneSpecTarget
+    if not di then return end
+    local rowData = LichborneTrackerDB.rows[di]
+    if not rowData then LichborneSpecTarget = nil; specRetries = 0; return end
+
+    local cls = rowData.cls or ""
+    local specNames = CLASS_SPECS[cls]
+    if not specNames then
+        DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Unknown class: "..cls, 1, 0.5, 0.5)
+        LichborneSpecTarget = nil; specRetries = 0
+        return
+    end
+
+    -- WotLK 3.3.5a: pass inspect=true to read target's talents
+    local inspectSelf = (LichborneInspectUnit and UnitIsUnit(LichborneInspectUnit, "player"))
+    local treePts = {0, 0, 0}
+    for tab = 1, 3 do
+        local numTalents = GetNumTalents(tab, inspectSelf and false or true)
+        if numTalents and numTalents > 0 then
+            for t = 1, numTalents do
+                local name, _, _, _, currRank = GetTalentInfo(tab, t, inspectSelf and false or true)
+                if currRank and currRank > 0 then
+                    treePts[tab] = treePts[tab] + currRank
+                end
+            end
+        end
+    end
+
+    -- Try the direct tab points API
+    local tabPts = {0, 0, 0}
+    local gotTabData = false
+    for tab = 1, 3 do
+        local _, _, pts = GetTalentTabInfo(tab, inspectSelf and false or true)
+        if pts and pts > 0 then
+            tabPts[tab] = pts
+            gotTabData = true
+        end
+    end
+    -- Prefer tabPts if available, else fall back to treePts
+    local pts = gotTabData and tabPts or treePts
+
+    local best, bestPoints = 1, 0
+    for tab = 1, 3 do
+        if pts[tab] > bestPoints then
+            bestPoints = pts[tab]
+            best = tab
+        end
+    end
+
+    if bestPoints == 0 then
+        specRetries = specRetries + 1
+        if specRetries >= MAX_SPEC_RETRIES then
+            DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Could not read talent data for "..tostring(rowData.name)..". Target may need to be in range.", 1, 0.5, 0.5)
+            if LichborneAddStatus then
+                LichborneAddStatus:SetText("|cffff9900Talent data unavailable. Try standing closer.|r")
+            end
+            LichborneSpecTarget = nil; specRetries = 0
+        end
+        -- else: silent retry, no spam
+        return
+    end
+
+    specRetries = 0
+    local specName = specNames[best] or ""
+    rowData.spec = specName
+
+    local c = CLASS_COLORS[cls]
+    local hex = c and string.format("|cff%02x%02x%02x", math.floor(c.r*255), math.floor(c.g*255), math.floor(c.b*255)) or "|cffffffff"
+    if LichborneAddStatus then
+        LichborneAddStatus:SetText(hex..(rowData.name or "?").."|r — Spec: |cffffff00"..specName.."|r ("..bestPoints.." pts)")
+    end
+    DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Spec: |cffffff00"..specName.."|r ("..bestPoints.." pts)", 1, 0.85, 0)
+
+    ClearInspectPlayer()
+    LichborneSpecTarget = nil
+    RefreshRows()
+end
+
+local specWait = 0
+local specFrame = CreateFrame("Frame")
+specFrame:SetScript("OnUpdate", function(_, elapsed)
+    if not LichborneSpecTarget then return end
+    specWait = specWait + elapsed
+    if specWait >= 2.0 then
+        specWait = 0
+        CalcSpec()
+    end
+end)
+specFrame:RegisterEvent("INSPECT_READY")
+specFrame:SetScript("OnEvent", function()
+    if not LichborneSpecTarget then return end
+    specWait = 0
+    CalcSpec()
+end)
+
+-- ── Inspect handler ───────────────────────────────────────────
+LichborneInspectTarget = nil
+LichborneInspectRow = nil
+LichborneInspectUnit = "target"  -- unit token for current inspect
+local LichborneInspectRetries = 0  -- retry counter for empty gear data
+local INSPECT_MAX_RETRIES = 3      -- max silent retries before giving up
+-- inspectWait declared at module top (shared with button callbacks in OnFirstShow)
+
+local function CalcGS()
+    local di = LichborneInspectTarget
+    if not di then return end
+    local inspUnit = LichborneInspectUnit or "target"
+    local slots = {1,2,3,15,5,9,10,6,7,8,11,12,13,14,16,17,18}
+    local total, count = 0, 0
+
+    if not LichborneTrackerDB.rows[di].ilvl then
+        local g = {}
+        for i = 1, 17 do g[i] = 0 end
+        LichborneTrackerDB.rows[di].ilvl = g
+    end
+    if not LichborneTrackerDB.rows[di].ilvlLink then
+        local lnk = {}
+        for i = 1, 17 do lnk[i] = "" end
+        LichborneTrackerDB.rows[di].ilvlLink = lnk
+    end
+
+    local anyPending = false
+
+    -- Check if MH is a 2H weapon so we can blank OH instead of duplicating it
+    local mhLink = GetInventoryItemLink(inspUnit, 16)
+    local mhIs2H = false
+    if mhLink then
+        local _, _, _, _, _, _, _, _, mhEquipLoc = GetItemInfo(mhLink)
+        if mhEquipLoc == "INVTYPE_2HWEAPON" then
+            mhIs2H = true
+        end
+    end
+
+    for g, slot in ipairs(slots) do
+        -- slot 17 = OH; if MH is 2H, WoW mirrors the same link into slot 17 — blank it out
+        if slot == 17 and mhIs2H then
+            LichborneTrackerDB.rows[di].ilvl[g] = 0
+            LichborneTrackerDB.rows[di].ilvlLink[g] = ""
+        else
+            local link = GetInventoryItemLink(inspUnit, slot)
+            if link then
+                local _, _, _, itemIlvl = GetItemInfo(link)
+                if itemIlvl and itemIlvl > 0 then
+                    total = total + itemIlvl
+                    count = count + 1
+                    LichborneTrackerDB.rows[di].ilvl[g] = itemIlvl
+                    LichborneTrackerDB.rows[di].ilvlLink[g] = link
+                else
+                    -- GetItemInfo returned nil: item not yet in client cache.
+                    -- Calling it again issues the server request to populate the cache.
+                    -- Preserve the link so tooltip still works and retry can use it.
+                    GetItemInfo(link)
+                    anyPending = true
+                    LichborneTrackerDB.rows[di].ilvl[g] = 0
+                    LichborneTrackerDB.rows[di].ilvlLink[g] = link
+                end
+            else
+                LichborneTrackerDB.rows[di].ilvl[g] = 0
+                LichborneTrackerDB.rows[di].ilvlLink[g] = ""
+            end
+        end
+    end
+
+    -- If any slot came back uncached, wait and retry to fill in the missing data.
+    if anyPending then
+        if LichborneAddStatus then
+            LichborneAddStatus:SetText("|cffff9900Item data not cached yet, retrying...|r")
+        end
+        inspectWait = 0  -- reset so OnUpdate waits another full interval before next attempt
+        return
+    end
+
+    for _, row in ipairs(rowFrames) do
+        if row.dbIndex == di and row.gearBoxes then
+            for g = 1, 17 do
+                local v = LichborneTrackerDB.rows[di].ilvl[g] or 0
+                if row.gearBoxes[g] then
+                    row.gearBoxes[g]:SetText(v > 0 and tostring(v) or "")
+                    -- Apply item quality color
+                    local link2 = LichborneTrackerDB.rows[di].ilvlLink and LichborneTrackerDB.rows[di].ilvlLink[g]
+                    local qc2 = GetItemQualityColor(link2)
+                    if qc2 then
+                        row.gearBoxes[g]:SetTextColor(qc2.r, qc2.g, qc2.b)
+                    else
+                        row.gearBoxes[g]:SetTextColor(1, 1, 1)
+                    end
+                end
+            end
+            break
+        end
+    end
+
+    if count > 0 then
+        local rowData = LichborneTrackerDB.rows[di]
+        local ilvl = math.floor(total / count)
+        local realGs = CalculateUnitGearScore(inspUnit)
+
+        rowData.gs = ilvl
+        rowData.realGs = realGs
+
+        for _, row in ipairs(rowFrames) do
+            if row.dbIndex == di then
+                if row.gsBox then row.gsBox:SetText(tostring(ilvl)) end
+                if row.realGsBox then row.realGsBox:SetText(realGs > 0 and tostring(realGs) or "") end
+                break
+            end
+        end
+
+        local updatedName = rowData.name
+        if updatedName and updatedName ~= "" and LichborneTrackerDB.raidRosters then
+            for _, roster in pairs(LichborneTrackerDB.raidRosters) do
+                for _, slot in ipairs(roster) do
+                    if slot.name and slot.name:lower() == updatedName:lower() then
+                        slot.gs = ilvl
+                        slot.realGs = realGs
+                    end
+                end
+            end
+        end
+
+        local name = rowData.name or "?"
+        local cls = rowData.cls or "?"
+        local c = CLASS_COLORS[cls]
+        local hex = c and string.format("|cff%02x%02x%02x", math.floor(c.r * 255), math.floor(c.g * 255), math.floor(c.b * 255)) or "|cffffffff"
+        if LichborneAddStatus then
+            LichborneAddStatus:SetText(hex..name.."|r ("..cls..") - iLvl |cffffff00"..ilvl.."|r, GS |cffffff00"..realGs.."|r added!")
+        end
+        DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r iLvl: |cffffff00"..ilvl.."|r, GS: |cffffff00"..realGs.."|r ("..count.." slots)", 1, 0.85, 0)
+
+        local targetName = UnitName("target")
+        if targetName and targetName == UnitName("player") then
+            local specNames = CLASS_SPECS[rowData.cls or ""]
+            if specNames then
+                local bestTab, bestPoints = 1, 0
+                for tab = 1, 3 do
+                    local _, _, pts = GetTalentTabInfo(tab)
+                    if pts and pts > bestPoints then
+                        bestPoints = pts
+                        bestTab = tab
+                    end
+                end
+                if bestPoints > 0 then
+                    rowData.spec = specNames[bestTab] or rowData.spec
+                    DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Spec: |cffffff00"..specNames[bestTab].."|r ("..bestPoints.." pts)", 1, 0.85, 0)
+                end
+            end
+        end
+
+        RefreshRows()
+        if allRowFrames and #allRowFrames > 0 then RefreshAllRows() end
+        if raidRowFrames and #raidRowFrames > 0 then RefreshRaidRows() end
+        LichborneInspectRetries = 0  -- reset retry counter on success
+    else
+        -- No slots came back — inspect data not ready yet.
+        -- Retry silently up to INSPECT_MAX_RETRIES times before giving up.
+        LichborneInspectRetries = LichborneInspectRetries + 1
+        if LichborneInspectRetries <= INSPECT_MAX_RETRIES then
+            -- Re-fire NotifyInspect and let the timer try again
+            local unit = LichborneInspectUnit or "target"
+            if UnitExists(unit) then
+                NotifyInspect(unit)
+            end
+            inspectWait = 0  -- reset timer for next attempt
+            return  -- do NOT clear LichborneInspectTarget — keep retrying
+        end
+        -- Exhausted retries — only print to chat if it was a manual single-target inspect
+        -- (group scans handle their own flow; printing per-member is too spammy)
+        if LichborneAddStatus then
+            LichborneAddStatus:SetText("|cffff9900No gear data returned. Target may be out of range.|r")
+        end
+        -- Only chat-print if it was a manual (non-group-scan) inspect
+        -- Detect group scan: LichborneInspectUnit is a party/raid token, not "target"
+        local unit = LichborneInspectUnit or "target"
+        if unit == "target" or unit == "player" then
+            DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r No gear data returned. Move closer and try again.", 1, 0.5, 0)
+        end
+    end
+
+    LichborneInspectRetries = 0  -- reset for next inspect
+    ClearInspectPlayer()
+    LichborneInspectTarget = nil
+    LichborneInspectRow = nil
+end
+
+local inspectFrame = CreateFrame("Frame")
+-- inspectWait declared above CalcGS so the reset inside CalcGS targets the same local
+inspectFrame:SetScript("OnUpdate", function(_, elapsed)
+    if not LichborneInspectTarget then return end
+    inspectWait = inspectWait + elapsed
+    if inspectWait >= 1.5 then
+        inspectWait = 0
+        CalcGS()
+    end
+end)
+
+-- Also try INSPECT_READY in case server supports it
+inspectFrame:RegisterEvent("INSPECT_READY")
+inspectFrame:SetScript("OnEvent", function()
+    if not LichborneInspectTarget then return end
+    inspectWait = 0
+    LichborneInspectRetries = 0  -- fresh INSPECT_READY means fresh data incoming
+    CalcGS()
+end)
+
+
+-- ── Drag-to-reorder poller ────────────────────────────────────
+-- Polls every frame while dragging; detects mouse release and
+-- finds which row the cursor is over using GetCursorPosition.
+local dragPollFrame = CreateFrame("Frame")
+dragPollFrame:SetScript("OnUpdate", function()
+    if not dragSourceRow then return end
+
+    -- Detect mouse button released
+    if not IsMouseButtonDown("LeftButton") then
+        -- Find which rowFrame the cursor is currently over
+        local cx, cy = GetCursorPosition()
+        local scale = UIParent:GetEffectiveScale()
+        cx = cx / scale
+        cy = cy / scale
+
+        local targetRow = nil
+        for _, rf in ipairs(rowFrames) do
+            if rf:IsShown() and rf ~= dragSourceRow and rf.dbIndex then
+                local data = LichborneTrackerDB.rows[rf.dbIndex]
+                if data and data.name and data.name ~= "" then
+                    local left   = rf:GetLeft()
+                    local right  = rf:GetRight()
+                    local bottom = rf:GetBottom()
+                    local top    = rf:GetTop()
+                    if left and right and bottom and top then
+                        if cx >= left and cx <= right and cy >= bottom and cy <= top then
+                            targetRow = rf
+                            break
+                        end
+                    end
+                end
+            end
+        end
+
+        -- Perform insert if we found a valid target
+        if targetRow then
+            local a = dragSourceRow.dbIndex
+            local b = targetRow.dbIndex
+            if a and b and a ~= b then
+                local rows = LichborneTrackerDB.rows
+                local item = rows[a]
+                table.remove(rows, a)
+                local insertAt = b > a and b - 1 or b
+                table.insert(rows, insertAt, item)
+                classSortMode = nil  -- clear sort so drag order sticks
+                RefreshRows()
+            end
+        end
+
+        -- Reset all visual state
+        for _, rf in ipairs(rowFrames) do
+            rf.hov:SetTexture(0, 0, 0, 0)
+            rf.dropHi:SetTexture(0, 0, 0, 0)
+            if rf.dragLbl and rf.dbIndex then
+                local data = LichborneTrackerDB.rows[rf.dbIndex]
+                local cls = data and data.cls
+                local cc = cls and CLASS_COLORS[cls]
+                rf.dragLbl:SetTextColor(0.4, 0.4, 0.5, 1.0)
+            end
+        end
+        dragSourceRow = nil
+        return
+    end
+
+    -- Still dragging — highlight whichever row cursor is over
+    local cx, cy = GetCursorPosition()
+    local scale = UIParent:GetEffectiveScale()
+    cx = cx / scale
+    cy = cy / scale
+
+    for _, rf in ipairs(rowFrames) do
+        if rf:IsShown() and rf ~= dragSourceRow then
+            local left   = rf:GetLeft()
+            local right  = rf:GetRight()
+            local bottom = rf:GetBottom()
+            local top    = rf:GetTop()
+            if left and right and bottom and top then
+                if cx >= left and cx <= right and cy >= bottom and cy <= top then
+                    rf.dropHi:SetTexture(0.9, 0.7, 0.1, 0.20)
+                else
+                    rf.dropHi:SetTexture(0, 0, 0, 0)
+                end
+            end
+        end
+    end
+end)
+SLASH_LICHBORNE1 = "/lichborne"
+SLASH_LICHBORNE2 = "/lbt"
+SlashCmdList["LICHBORNE"] = function(msg)
+    if LichborneTrackerFrame and LichborneTrackerFrame:IsShown() then
+        LichborneTrackerFrame:Hide()
+    else
+        LichborneTracker_Open()
+    end
+end
+
