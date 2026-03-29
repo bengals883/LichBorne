@@ -2,7 +2,7 @@
 
 **A World of Warcraft WotLK 3.3.5a Addon for AzerothCore Private Servers that tracks gear score, iLvL, gear slots, specs, and raid composition for your entire playerbot roster.**
 
-**Version 1.74**
+**Version 1.75**
 
 ---
 
@@ -14,16 +14,15 @@
 
 ---
 
-## Recent Changes
+## Recent Changes (v1.75)
 
-- **Minimap icon fix (improved)** —  Fixed display issue and updated to a book texture for a cleaner look
-- **Gear Score average bar in Class tabs** Each class tab now displays an average GearScore bar alongside the existing average iLvl bar.
-- **Item quality colors on gear slots** — Gear slot icons in the class tab are now color-coded to match WoW item quality (grey, white, green, blue, purple, orange).
-- **Buttons disabled during scans** — Get Gear Score, Get Group Spec, and Invite Raid buttons are now disabled while a scan or invite sequence is running to prevent conflicts.
-- **Separate iLvl and GS columns** — The old GS field is now labeled iLvl, and a new GS column tracks actual GearScore.
-- **Actual GearScore calculation** — Inspect now calculates WotLK-style GearScore from equipped gear instead of reusing average item levels.
-- **Invite flow fixes** — Invite buttons now reflect whether you are inviting a raid, inviting a group, or have an active invite run.
-- **Need Box** — Up to 2 needed gear slots per character, editable across Class, All, and Raid tabs.
+- **Minimap icon fix (improved)** — Fixed display issue on machines where bundled libs failed to load silently
+- **Native fallback minimap button** — Activates automatically when LibDBIcon is unavailable (based on DBM implementation)
+- **Updated libs** — Replaced bundled libs with DBM-compatible versions for wider client support
+- **Load order fix** — Moved lib registration into ADDON_LOADED for correct initialization
+- **Minimap icon updated** — Changed to book texture (INV_Misc_Book_11) for a cleaner look
+
+(See CHANGELOG.md for full version history)
 
 ---
 
@@ -33,7 +32,7 @@
 
 Each of the 10 playable classes has its own tab with up to 54 roster slots (per class) across 3 pages. Each character row tracks:
 
-- Spec icon — auto-detected from talent inspection.  Can be manually changed.
+- Spec icon — auto-detected from talent inspection. Can be manually changed.
 - Name — editable, colored by class
 - iLvl — average equipped item level calculated via inspect
 - Gear Score — actual WotLK-style GearScore calculated from inspected gear, colored by item quality
@@ -42,7 +41,7 @@ Each of the 10 playable classes has its own tab with up to 54 roster slots (per 
 - Add to Raid (+) and Invite to Group (>) buttons per row
 - Hover any gear slot to see the full item tooltip
 
-### Bottom Controls 
+### Bottom Controls
 
 - **+ Add Target** — Inspects your current target and adds them
 - **+ Add Group** — Bulk-adds all group/raid members
