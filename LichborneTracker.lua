@@ -444,6 +444,7 @@ local LichborneAllFrame = nil
 local RefreshAllRows = nil  -- will be set after definition
 local RefreshRaidRows       -- forward declaration
 local UpdateSummary         -- forward declaration
+local SetScanActive         -- forward declaration (module-scope for CalcGS/CalcSpec access)
 local raidFrameBuilt = false
 local setupDone = false
 local dragSourceRow = nil   -- row frame being dragged
@@ -463,6 +464,7 @@ local LOCKABLE_BUTTONS = {
     "LichborneLogoutBtn",
     "LichborneMaintBtn",
     "LichborneAutogearBtn",
+    "LichborneOrphanedBotsBtn",
 }
 
 local function SetButtonsLocked(locked)
@@ -2806,8 +2808,8 @@ local function BuildRaidFrame(parent, fl)
     -- Invite button lives on main frame beside Add Target/Update GS buttons
 
     local inviteBtn = CreateFrame("Button","LichborneInviteRaidBtn",LichborneRaidFrame:GetParent())
-    inviteBtn:SetPoint("BOTTOMLEFT", LichborneRaidFrame:GetParent(), "BOTTOMLEFT", 525, 10)
-    inviteBtn:SetSize(180, 130)
+    inviteBtn:SetPoint("BOTTOMLEFT", LichborneRaidFrame:GetParent(), "BOTTOMLEFT", 525, 42)
+    inviteBtn:SetSize(180, 98)
     inviteBtn:SetFrameLevel(fl + 12)
     inviteBtn:Hide()  -- hidden until Raid tab is active
     inviteBtn:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
@@ -2866,33 +2868,14 @@ local function BuildRaidFrame(parent, fl)
 
         SetInviteActive(true)
         DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Starting raid invite for "..#names.." players...",1,0.85,0)
-        if LichborneAddStatus then LichborneAddStatus:SetText("|cffff9900Removing current bots by name...") end
+        if LichborneAddStatus then LichborneAddStatus:SetText("|cffff9900Logging out all bots...") end
 
-        -- Step 0: Leave party immediately
-        LeaveParty()
-
-        -- Collect all known bot names across ALL rosters to remove individually
-        local botsToRemove = {}
-        local seen = {}
-        local allRosters = LichborneTrackerDB.raidRosters or {}
-        for _, roster in pairs(allRosters) do
-            for i = 1, MAX_RAID_SLOTS do
-                local r = roster[i]
-                if r and r.name and r.name ~= "" and not seen[r.name:lower()] then
-                    seen[r.name:lower()] = true
-                    botsToRemove[#botsToRemove+1] = r.name
-                end
-            end
-        end
-        -- Fallback: if no rosters found, just remove the current invite list
-        if #botsToRemove == 0 then
-            for _, n in ipairs(names) do botsToRemove[#botsToRemove+1] = n end
-        end
+        -- Step 0: Remove all bots with wildcard
+        SendChatMessage(".playerbots bot remove *", "SAY")
 
         local inviteIndex = 1
         local waitTime = 0
-        local phase = "logout_remove"
-        local logoutIndex = 1
+        local phase = "logout_wait"
         local reinviteSubPhase = "remove"
 
         local inviteFrame = CreateFrame("Frame")
@@ -2901,22 +2884,17 @@ local function BuildRaidFrame(parent, fl)
         inviteFrame:SetScript("OnUpdate",function(_, elapsed)
             waitTime = waitTime + elapsed
 
-            if phase == "logout_remove" then
-                if waitTime < 0.1 then return end
+            if phase == "logout_wait" then
+                if waitTime < 1.5 then return end
                 waitTime = 0
-                if logoutIndex > #botsToRemove then
-                    phase = "logout_wait"
-                    waitTime = 0
-                    DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r All bots removed, waiting...",1,0.85,0)
-                    if LichborneAddStatus then LichborneAddStatus:SetText("|cffff9900Waiting for bots to clear...") end
-                    return
-                end
-                local bname = botsToRemove[logoutIndex]
-                SendChatMessage(".playerbots bot remove "..bname, "SAY")
-                logoutIndex = logoutIndex + 1
+                -- Leave party after bots are removed
+                LeaveParty()
+                phase = "leave_wait"
+                DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Bots removed, leaving party...",1,0.85,0)
+                if LichborneAddStatus then LichborneAddStatus:SetText("|cffff9900Leaving party, then inviting...") end
 
-            elseif phase == "logout_wait" then
-                if waitTime < 2.0 then return end
+            elseif phase == "leave_wait" then
+                if waitTime < 1.0 then return end
                 waitTime = 0
                 phase = "first"
                 DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Bots cleared, starting invites...",1,0.85,0)
@@ -3018,8 +2996,8 @@ local function BuildRaidFrame(parent, fl)
 
     -- ── Invite Group button (for T0 5-mans, no raid conversion) ──
     local inviteGroupBtn = CreateFrame("Button","LichborneInviteGroupBtn",LichborneRaidFrame:GetParent())
-    inviteGroupBtn:SetPoint("BOTTOMLEFT", LichborneRaidFrame:GetParent(), "BOTTOMLEFT", 525, 10)
-    inviteGroupBtn:SetSize(180, 130)
+    inviteGroupBtn:SetPoint("BOTTOMLEFT", LichborneRaidFrame:GetParent(), "BOTTOMLEFT", 525, 42)
+    inviteGroupBtn:SetSize(180, 98)
     inviteGroupBtn:SetFrameLevel(fl + 12)
     inviteGroupBtn:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
     inviteGroupBtn:SetBackdropColor(0.05,0.25,0.30,1)
@@ -3070,28 +3048,101 @@ local function BuildRaidFrame(parent, fl)
         end
         SetInviteActive(true)
         DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Starting group invite for "..#names.." players...",1,0.85,0)
-        LeaveParty()
+        if LichborneAddStatus then LichborneAddStatus:SetText("|cffff9900Logging out all bots...") end
+        -- Remove all bots with wildcard first
+        SendChatMessage(".playerbots bot remove *", "SAY")
         local invIdx = 1
         local waited = 0
+        local grpPhase = "logout_wait"
+        local grpReinviteSubPhase = "remove"
         local grpFrame = CreateFrame("Frame")
         activeInviteFrame = grpFrame
         UpdateInviteButtons()
         grpFrame:SetScript("OnUpdate",function(_, elapsed)
             waited = waited + elapsed
-            if waited < 0.8 then return end
-            waited = 0
-            if invIdx > #names then
-                DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cff44ff44Group invite complete! ("..#names.." players)|r",1,0.85,0)
-                grpFrame:SetScript("OnUpdate",nil)
-                activeInviteFrame = nil
-                SetInviteActive(false)
-                UpdateInviteButtons()
-                return
+            if grpPhase == "logout_wait" then
+                if waited < 1.5 then return end
+                waited = 0
+                LeaveParty()
+                grpPhase = "leave_wait"
+                DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Bots removed, leaving party...",1,0.85,0)
+                if LichborneAddStatus then LichborneAddStatus:SetText("|cffff9900Leaving party, then inviting...") end
+            elseif grpPhase == "leave_wait" then
+                if waited < 1.0 then return end
+                waited = 0
+                grpPhase = "invite"
+                DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Starting group invites...",1,0.85,0)
+                if LichborneAddStatus then LichborneAddStatus:SetText("|cffff9900Inviting "..#names.." players...") end
+            elseif grpPhase == "invite" then
+                if waited < 0.8 then return end
+                waited = 0
+                if invIdx > #names then
+                    -- Verify pass
+                    grpPhase = "verify_wait"
+                    waited = 0
+                    DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Initial invites sent, verifying...",1,0.85,0)
+                    return
+                end
+                local pname = names[invIdx]
+                SendChatMessage(".playerbots bot add "..pname, "SAY")
+                DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Inviting "..pname.."...",1,0.85,0)
+                invIdx = invIdx + 1
+            elseif grpPhase == "verify_wait" then
+                if waited < 3.0 then return end
+                -- Build set of who is currently in the party
+                local inParty = {}
+                for pi = 1, GetNumPartyMembers() do
+                    local pn = UnitName("party"..pi)
+                    if pn then inParty[pn:lower()] = true end
+                end
+                local selfName = UnitName("player")
+                if selfName then inParty[selfName:lower()] = true end
+                local missing = {}
+                for _, pname in ipairs(names) do
+                    if not inParty[pname:lower()] then
+                        missing[#missing+1] = pname
+                    end
+                end
+                if #missing == 0 then
+                    DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cff44ff44All "..#names.." players confirmed in group!|r",1,0.85,0)
+                    if LichborneAddStatus then LichborneAddStatus:SetText("|cff44ff44All "..#names.." players confirmed in group.|r") end
+                    grpFrame:SetScript("OnUpdate",nil)
+                    activeInviteFrame = nil
+                    SetInviteActive(false)
+                    UpdateInviteButtons()
+                    return
+                end
+                DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cffff9900"..#missing.." missed — re-inviting...|r",1,0.85,0)
+                names = missing
+                invIdx = 1
+                grpPhase = "reinvite"
+                waited = 0
+            elseif grpPhase == "reinvite" then
+                if grpReinviteSubPhase == "remove" then
+                    if invIdx > #names then
+                        DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cff44ff44Re-invite pass complete.|r",1,0.85,0)
+                        if LichborneAddStatus then LichborneAddStatus:SetText("|cff44ff44Invite complete (re-invite pass done).|r") end
+                        grpFrame:SetScript("OnUpdate",nil)
+                        activeInviteFrame = nil
+                        SetInviteActive(false)
+                        UpdateInviteButtons()
+                        return
+                    end
+                    local pname = names[invIdx]
+                    SendChatMessage(".playerbots bot remove "..pname, "SAY")
+                    DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Removing "..pname.." before re-invite...",1,0.85,0)
+                    waited = 0
+                    grpReinviteSubPhase = "add"
+                elseif grpReinviteSubPhase == "add" then
+                    if waited < 1.0 then return end
+                    local pname = names[invIdx]
+                    SendChatMessage(".playerbots bot add "..pname, "SAY")
+                    DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Re-inviting "..pname.."...",1,0.85,0)
+                    invIdx = invIdx + 1
+                    waited = 0
+                    grpReinviteSubPhase = "remove"
+                end
             end
-            local pname = names[invIdx]
-            SendChatMessage(".playerbots bot add "..pname, "SAY")
-            DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Inviting "..pname.."...",1,0.85,0)
-            invIdx = invIdx + 1
         end)
     end)
     _G["LichborneInviteGroupBtn"] = inviteGroupBtn
@@ -3922,9 +3973,7 @@ local function OnFirstShow()
 
     addBtn:SetScript("OnEnter", function()
         GameTooltip:SetOwner(addBtn, "ANCHOR_TOP")
-        GameTooltip:AddLine("Add Target to Tracker", 1, 1, 1)
-        GameTooltip:AddLine("Target a player, then click to", 0.8, 0.8, 0.8)
-        GameTooltip:AddLine("auto-detect class, name & GS", 0.8, 0.8, 0.8)
+        GameTooltip:AddLine("Adds the target to the tracker.", 1, 1, 1)
         GameTooltip:Show()
     end)
     addBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -3950,15 +3999,13 @@ local function OnFirstShow()
             if row.name and row.name:lower() == targetName:lower() then
                 local c = CLASS_COLORS[cls]
                 local hex = string.format("|cff%02x%02x%02x", math.floor(c.r*255), math.floor(c.g*255), math.floor(c.b*255))
-                LichborneAddStatus:SetText(hex..targetName.."|r already in "..cls.." tab.")
+                LichborneAddStatus:SetText(hex..targetName.."|r already in tracker.")
                 return
             end
         end
 
         local targetDi = nil
-        local slotNum = 0
         for _, di in ipairs(indices) do
-            slotNum = slotNum + 1
             local row = LichborneTrackerDB.rows[di]
             if not row.name or row.name == "" then
                 targetDi = di
@@ -3969,26 +4016,15 @@ local function OnFirstShow()
             LichborneAddStatus:SetText("|cffff4444"..cls.." tab is full ("..MAX_ROWS*MAX_PAGES.."/"..MAX_ROWS*MAX_PAGES..").|r")
             return
         end
-        -- Auto-jump to the page containing the new slot
-        classPage[cls] = math.ceil(slotNum / ROWS_PER_PAGE)
 
         LichborneTrackerDB.rows[targetDi].name = targetName
 
         local c = CLASS_COLORS[cls]
         local hex = string.format("|cff%02x%02x%02x", math.floor(c.r*255), math.floor(c.g*255), math.floor(c.b*255))
-        LichborneAddStatus:SetText("Inspecting "..hex..targetName.."|r ("..cls..")...")
+        LichborneAddStatus:SetText(hex..targetName.."|r added to All tab.")
+        DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Added "..hex..targetName.."|r ("..cls..")", 1, 0.85, 0)
 
-        activeTab = cls
-        UpdateTabs()
-        RefreshRows()
-
-        LichborneInspectTarget = targetDi
-        LichborneSpecTarget = targetDi
-        LichborneInspectUnit = "target"
-        NotifyInspect("target")
-        inspectWait = 0
-
-        DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Adding "..hex..targetName.."|r ("..cls..")...", 1, 0.85, 0)
+        if allRowFrames and #allRowFrames > 0 then RefreshAllRows() end
     end)
 
     -- ── Add Group button ───────────────────────────────────────
@@ -4014,8 +4050,7 @@ local function OnFirstShow()
         GameTooltip:SetOwner(addGroupBtn, "ANCHOR_TOP")
         GameTooltip:AddLine("Add Group to Tracker", 1, 1, 1)
         GameTooltip:AddLine("Scans all players in your party/raid", 0.8, 0.8, 0.8)
-        GameTooltip:AddLine("and adds them to their class tabs.", 0.8, 0.8, 0.8)
-        GameTooltip:AddLine("Skips duplicates automatically.", 0.6, 0.6, 0.6)
+        GameTooltip:AddLine("and adds them to the tracker.", 0.8, 0.8, 0.8)
         GameTooltip:Show()
     end)
     addGroupBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -4221,50 +4256,162 @@ local function OnFirstShow()
     -- ── Update Target GS (row y=78, left) ────────────────────
     local gsBtn = MakeTrackerBtn("LichborneUpdateGSBtn", 15, 78, 155, 28, 0.20, 0.80, 0.90, "|cffd4af37+ Add Target GS|r")
     gsBtn:SetScript("OnEnter", function()
-        GameTooltip:SetOwner(gsBtn,"ANCHOR_TOP"); GameTooltip:AddLine("Get Target GS",1,1,1)
-        GameTooltip:AddLine("Target a tracked player to refresh their gear score.",0.8,0.8,0.8)
+        GameTooltip:SetOwner(gsBtn,"ANCHOR_TOP")
+        GameTooltip:AddLine("Adds target gear score to tracker",1,1,1)
         GameTooltip:Show()
     end)
     gsBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
     gsBtn:SetScript("OnClick", function()
         if not UnitExists("target") or not UnitIsPlayer("target") then LichborneAddStatus:SetText("|cffff4444No player targeted.|r"); return end
         local targetName = UnitName("target")
+        local _, targetClassGS = UnitClass("target")
+        local clsGS = targetClassGS and CLASS_TOKEN_MAP[targetClassGS]
+        -- Add to tracker if not already there
         local foundDi = nil
         for i, row in ipairs(LichborneTrackerDB.rows) do
             if row.name and row.name:lower() == targetName:lower() then foundDi = i; break end
         end
-        if not foundDi then LichborneAddStatus:SetText("|cffff9900"..targetName.." not found. Use + Add Target first.|r"); return end
+        if not foundDi then
+            if not clsGS then LichborneAddStatus:SetText("|cffff4444Unknown class for "..targetName.."|r"); return end
+            EnsureClass(clsGS)
+            local idxs = GetAllClassRows(clsGS)
+            for _, di in ipairs(idxs) do
+                local row = LichborneTrackerDB.rows[di]
+                if not row.name or row.name == "" then foundDi = di; break end
+            end
+            if not foundDi then LichborneAddStatus:SetText("|cffff4444"..clsGS.." tab is full.|r"); return end
+            LichborneTrackerDB.rows[foundDi].name = targetName
+            if allRowFrames and #allRowFrames > 0 then RefreshAllRows() end
+            local cA = CLASS_COLORS[clsGS]; local hA = cA and string.format("|cff%02x%02x%02x",math.floor(cA.r*255),math.floor(cA.g*255),math.floor(cA.b*255)) or "|cffffffff"
+            DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Added "..hA..targetName.."|r to tracker.", 1, 0.85, 0)
+        end
         local rowData = LichborneTrackerDB.rows[foundDi]
         local c = CLASS_COLORS[rowData.cls or ""]; local hex = c and string.format("|cff%02x%02x%02x",math.floor(c.r*255),math.floor(c.g*255),math.floor(c.b*255)) or "|cffffffff"
-        LichborneAddStatus:SetText("Updating GS for "..hex..targetName.."|r...")
-        LichborneInspectTarget = foundDi; LichborneInspectUnit = "target"
-        NotifyInspect("target"); inspectWait = 0
-        DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Updating GS for "..hex..targetName.."|r...", 1, 0.85, 0)
+        LichborneAddStatus:SetText("Adding GS for "..hex..targetName.."|r...")
+        DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Adding GS for "..hex..targetName.."|r...", 1, 0.85, 0)
+        local gsDi = foundDi
+        -- Lock all buttons (including Stop and invite) during single-target scan
+        SetScanActive(true)
+        local stopBtn = _G["LichborneStopInspectBtn"]
+        if stopBtn then stopBtn:Disable(); stopBtn:SetAlpha(0.35) end
+        -- Self-contained OnUpdate loop: owns the entire lock-to-unlock lifecycle
+        local gsPhase = "delay"
+        local gsElapsed = 0
+        local GS_TIMEOUT = 15  -- hard safety timeout in seconds
+        local gsTotalTime = 0
+        local gsFrame = CreateFrame("Frame")
+        gsFrame:SetScript("OnUpdate", function(_, delta)
+            gsElapsed = gsElapsed + delta
+            gsTotalTime = gsTotalTime + delta
+            -- Hard timeout: always unlock no matter what
+            if gsTotalTime >= GS_TIMEOUT then
+                gsFrame:SetScript("OnUpdate", nil)
+                LichborneInspectTarget = nil
+                ClearInspectPlayer()
+                SetScanActive(false)
+                if stopBtn then stopBtn:Enable(); stopBtn:SetAlpha(1.0) end
+                if LichborneAddStatus then LichborneAddStatus:SetText("|cffff9900GS scan timed out.|r") end
+                DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cffff9900Target GS scan timed out.|r", 1, 0.85, 0)
+                return
+            end
+            if gsPhase == "delay" then
+                if gsElapsed < 0.5 then return end
+                gsElapsed = 0
+                LichborneInspectTarget = gsDi; LichborneInspectUnit = "target"
+                NotifyInspect("target"); inspectWait = 0
+                gsPhase = "wait"
+            elseif gsPhase == "wait" then
+                -- CalcGS sets LichborneInspectTarget = nil when done
+                if LichborneInspectTarget == nil then
+                    gsFrame:SetScript("OnUpdate", nil)
+                    SetScanActive(false)
+                    if stopBtn then stopBtn:Enable(); stopBtn:SetAlpha(1.0) end
+                    return
+                end
+            end
+        end)
     end)
 
     -- ── Update Target Spec (row y=78, right) ──────────────────
     local tsBtn = MakeTrackerBtn("LichborneUpdateTargetSpecBtn", 15, 44, 155, 28, 0.20, 0.80, 0.90, "|cffd4af37+ Add Target Spec|r")
     tsBtn:SetScript("OnEnter", function()
-        GameTooltip:SetOwner(tsBtn,"ANCHOR_TOP"); GameTooltip:AddLine("Get Target Spec",1,1,1)
-        GameTooltip:AddLine("Target a tracked player to read their talent spec.",0.8,0.8,0.8)
+        GameTooltip:SetOwner(tsBtn,"ANCHOR_TOP")
+        GameTooltip:AddLine("Adds target spec to tracker",1,1,1)
+        GameTooltip:AddLine("Spec is assigned to the tree with the most talent points invested.",0.6,0.6,0.6)
+        GameTooltip:AddLine("Ties go to the first tree.",0.6,0.6,0.6)
         GameTooltip:Show()
     end)
     tsBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
     tsBtn:SetScript("OnClick", function()
         if not UnitExists("target") or not UnitIsPlayer("target") then LichborneAddStatus:SetText("|cffff4444No player targeted.|r"); return end
         local targetName = UnitName("target")
+        local _, targetClassSP = UnitClass("target")
+        local clsSP = targetClassSP and CLASS_TOKEN_MAP[targetClassSP]
+        -- Add to tracker if not already there
         local foundDi = nil
         for i, row in ipairs(LichborneTrackerDB.rows) do
             if row.name and row.name:lower() == targetName:lower() then foundDi = i; break end
         end
-        if not foundDi then LichborneAddStatus:SetText("|cffff9900"..targetName.." not found. Use + Add Target first.|r"); return end
+        if not foundDi then
+            if not clsSP then LichborneAddStatus:SetText("|cffff4444Unknown class for "..targetName.."|r"); return end
+            EnsureClass(clsSP)
+            local idxs = GetAllClassRows(clsSP)
+            for _, di in ipairs(idxs) do
+                local row = LichborneTrackerDB.rows[di]
+                if not row.name or row.name == "" then foundDi = di; break end
+            end
+            if not foundDi then LichborneAddStatus:SetText("|cffff4444"..clsSP.." tab is full.|r"); return end
+            LichborneTrackerDB.rows[foundDi].name = targetName
+            if allRowFrames and #allRowFrames > 0 then RefreshAllRows() end
+            local cA = CLASS_COLORS[clsSP]; local hA = cA and string.format("|cff%02x%02x%02x",math.floor(cA.r*255),math.floor(cA.g*255),math.floor(cA.b*255)) or "|cffffffff"
+            DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Added "..hA..targetName.."|r to tracker.", 1, 0.85, 0)
+        end
         local rowData = LichborneTrackerDB.rows[foundDi]
         local c = CLASS_COLORS[rowData.cls or ""]; local hex = c and string.format("|cff%02x%02x%02x",math.floor(c.r*255),math.floor(c.g*255),math.floor(c.b*255)) or "|cffffffff"
-        LichborneAddStatus:SetText("Reading spec for "..hex..targetName.."|r...")
-        LichborneSpecTarget = foundDi; LichborneInspectUnit = "target"
-        LichborneTrackerDB.rows[foundDi].spec = ""
-        NotifyInspect("target"); specWait = 0
-        DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Reading spec for "..hex..targetName.."|r...", 1, 0.85, 0)
+        LichborneAddStatus:SetText("Adding spec for "..hex..targetName.."|r...")
+        DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Adding spec for "..hex..targetName.."|r...", 1, 0.85, 0)
+        local spDi = foundDi
+        -- Lock all buttons (including Stop and invite) during single-target scan
+        SetScanActive(true)
+        local stopBtn = _G["LichborneStopInspectBtn"]
+        if stopBtn then stopBtn:Disable(); stopBtn:SetAlpha(0.35) end
+        -- Self-contained OnUpdate loop: owns the entire lock-to-unlock lifecycle
+        local spPhase = "delay"
+        local spElapsed = 0
+        local SP_TIMEOUT = 15  -- hard safety timeout in seconds
+        local spTotalTime = 0
+        local spFrame = CreateFrame("Frame")
+        spFrame:SetScript("OnUpdate", function(_, delta)
+            spElapsed = spElapsed + delta
+            spTotalTime = spTotalTime + delta
+            -- Hard timeout: always unlock no matter what
+            if spTotalTime >= SP_TIMEOUT then
+                spFrame:SetScript("OnUpdate", nil)
+                LichborneSpecTarget = nil
+                ClearInspectPlayer()
+                SetScanActive(false)
+                if stopBtn then stopBtn:Enable(); stopBtn:SetAlpha(1.0) end
+                if LichborneAddStatus then LichborneAddStatus:SetText("|cffff9900Spec scan timed out.|r") end
+                DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cffff9900Target spec scan timed out.|r", 1, 0.85, 0)
+                return
+            end
+            if spPhase == "delay" then
+                if spElapsed < 0.5 then return end
+                spElapsed = 0
+                LichborneSpecTarget = spDi; LichborneInspectUnit = "target"
+                LichborneTrackerDB.rows[spDi].spec = ""
+                NotifyInspect("target"); specWait = 0
+                spPhase = "wait"
+            elseif spPhase == "wait" then
+                -- CalcSpec sets LichborneSpecTarget = nil when done
+                if LichborneSpecTarget == nil then
+                    spFrame:SetScript("OnUpdate", nil)
+                    SetScanActive(false)
+                    if stopBtn then stopBtn:Enable(); stopBtn:SetAlpha(1.0) end
+                    return
+                end
+            end
+        end)
     end)
 
     -- ── Update Group GS (row y=44, left) ──────────────────────
@@ -4287,9 +4434,9 @@ local function OnFirstShow()
     end
     local uggsBtn = MakeTrackerBtn("LichborneUpdateGroupGSBtn", 175, 78, 155, 28, 0.10, 0.40, 0.70, "|cffd4af37+ Add Group GS|r")
     uggsBtn:SetScript("OnEnter", function()
-        GameTooltip:SetOwner(uggsBtn,"ANCHOR_TOP"); GameTooltip:AddLine("Get Group GS",1,1,1)
-        GameTooltip:AddLine("Inspects every tracked group member for gear score.",0.8,0.8,0.8)
-        GameTooltip:AddLine("Allow ~2.5s per player.",0.6,0.6,0.6)
+        GameTooltip:SetOwner(uggsBtn,"ANCHOR_TOP"); GameTooltip:AddLine("Add Group GS",1,1,1)
+        GameTooltip:AddLine("Adds all group members to the tracker, then inspects",0.8,0.8,0.8)
+        GameTooltip:AddLine("each for their gear score. Allow ~2.5s per player.",0.8,0.8,0.8)
         GameTooltip:Show()
     end)
     uggsBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -4340,9 +4487,9 @@ local function OnFirstShow()
     -- ── Update Group Spec (row y=44, right) ───────────────────
     local ugsBtn = MakeTrackerBtn("LichborneUpdateGroupSpecBtn", 175, 44, 155, 28, 0.10, 0.40, 0.70, "|cffd4af37+ Add Group Spec|r")
     ugsBtn:SetScript("OnEnter", function()
-        GameTooltip:SetOwner(ugsBtn,"ANCHOR_TOP"); GameTooltip:AddLine("Get Group Spec",1,1,1)
-        GameTooltip:AddLine("Reads talent spec for every tracked group member.",0.8,0.8,0.8)
-        GameTooltip:AddLine("Allow ~3s per player.",0.6,0.6,0.6)
+        GameTooltip:SetOwner(ugsBtn,"ANCHOR_TOP"); GameTooltip:AddLine("Add Group Spec",1,1,1)
+        GameTooltip:AddLine("Adds all group members to the tracker, then reads",0.8,0.8,0.8)
+        GameTooltip:AddLine("the talent spec for each. Allow ~3s per player.",0.8,0.8,0.8)
         GameTooltip:Show()
     end)
     ugsBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -4405,6 +4552,8 @@ local function OnFirstShow()
             activeInspectFrame:SetScript("OnUpdate", nil)
             activeInspectFrame = nil
         end
+        LichborneInspectTarget = nil
+        LichborneSpecTarget = nil
         SetScanActive(false)
         LichborneAddStatus:SetText("|cffff4444Scan stopped.|r")
         DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cffff4444Scan stopped.|r", 1, 0.85, 0)
@@ -4545,7 +4694,101 @@ local function OnFirstShow()
         nil, {{"Logout All Bots",1,1,1},{".playerbots bot remove *",0.8,0.8,0.8}})
     logoutBtn:SetScript("OnClick", function() SendChatMessage(".playerbots bot remove *", "PARTY") end)
 
-    -- ── Disband Group/Raid button ──────────────────────────────
+    -- ── Remove Orphaned Bots button ────────────────────────────
+    -- Sends .playerbots bot remove <name> for every character in the All tab roster
+    -- Used when bots are still logged in but player has left the group
+    local orphanedBotsBtn = CreateFrame("Button", "LichborneOrphanedBotsBtn", f)
+    orphanedBotsBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 525, 10)
+    orphanedBotsBtn:SetSize(180, 28)
+    orphanedBotsBtn:SetFrameLevel(fl + 12)
+    orphanedBotsBtn:SetBackdrop({bgFile="Interface\\ChatFrame\\ChatFrameBackground",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",tile=true,tileSize=16,edgeSize=8,insets={left=2,right=2,top=2,bottom=2}})
+    orphanedBotsBtn:SetBackdropColor(0.90*0.30, 0.20*0.30, 0.20*0.30, 1)
+    orphanedBotsBtn:SetBackdropBorderColor(0.78, 0.61, 0.23, 0.9)
+    orphanedBotsBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight", "ADD")
+    local orphanedBotsLbl = orphanedBotsBtn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    orphanedBotsLbl:SetAllPoints(orphanedBotsBtn); orphanedBotsLbl:SetJustifyH("CENTER"); orphanedBotsLbl:SetJustifyV("MIDDLE")
+    orphanedBotsLbl:SetText("|cffd4af37Logout Orphaned Bots|r")
+    orphanedBotsBtn:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(orphanedBotsBtn, "ANCHOR_TOP")
+        GameTooltip:AddLine("Logout Orphaned Bots", 1, 1, 1)
+        GameTooltip:AddLine("Logs out bots in your All tab that are", 0.8, 0.8, 0.8)
+        GameTooltip:AddLine("not currently in your group or raid.", 0.8, 0.8, 0.8)
+        GameTooltip:AddLine("Sends: .playerbots bot remove <name>", 0.6, 0.6, 0.6)
+        GameTooltip:Show()
+    end)
+    orphanedBotsBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    orphanedBotsBtn:SetScript("OnClick", function()
+        -- Get current group/raid members
+        local groupMembers = {}
+        local playerName = UnitName("player")
+        if playerName then groupMembers[playerName:lower()] = true end
+        if GetNumRaidMembers() > 0 then
+            for i = 1, GetNumRaidMembers() do
+                local unit = "raid"..i
+                if UnitExists(unit) then
+                    local name = UnitName(unit)
+                    if name then groupMembers[name:lower()] = true end
+                end
+            end
+        elseif GetNumPartyMembers() > 0 then
+            for i = 1, GetNumPartyMembers() do
+                local unit = "party"..i
+                if UnitExists(unit) then
+                    local name = UnitName(unit)
+                    if name then groupMembers[name:lower()] = true end
+                end
+            end
+        end
+        -- Collect names from All tab that are NOT in the current group
+        local botNames = {}
+        local seen = {}
+        if LichborneTrackerDB.allGroups then
+            for _, g in ipairs({"A","B","C"}) do
+                local grp = LichborneTrackerDB.allGroups[g]
+                if grp then
+                    for i = 1, 60 do
+                        local r = grp[i]
+                        if r and r.name and r.name ~= "" and not seen[r.name:lower()] then
+                            seen[r.name:lower()] = true
+                            if not groupMembers[r.name:lower()] then
+                                botNames[#botNames+1] = r.name
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        if #botNames == 0 then
+            DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r No orphaned bots found.", 1, 0.5, 0.5)
+            if LichborneAddStatus then LichborneAddStatus:SetText("|cffff4444No orphaned bots found.|r") end
+            return
+        end
+        DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r Logging out "..#botNames.." orphaned bots...", 1, 0.85, 0)
+        if LichborneAddStatus then LichborneAddStatus:SetText("|cffff9900Logging out "..#botNames.." orphaned bots...") end
+        SetScanActive(true)
+        local stopBtn = _G["LichborneStopInspectBtn"]
+        if stopBtn then stopBtn:Disable(); stopBtn:SetAlpha(0.35) end
+        local orphanIdx = 1
+        local orphanWait = 0
+        local orphanFrame = CreateFrame("Frame")
+        orphanFrame:SetScript("OnUpdate", function(_, elapsed)
+            orphanWait = orphanWait + elapsed
+            if orphanWait < 0.2 then return end
+            orphanWait = 0
+            if orphanIdx > #botNames then
+                orphanFrame:SetScript("OnUpdate", nil)
+                SetScanActive(false)
+                local stopBtn2 = _G["LichborneStopInspectBtn"]
+                if stopBtn2 then stopBtn2:Enable(); stopBtn2:SetAlpha(1.0) end
+                DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cff44ff44All "..#botNames.." orphaned bots logged out.|r", 1, 0.85, 0)
+                if LichborneAddStatus then LichborneAddStatus:SetText("|cff44ff44Orphaned bots logged out ("..#botNames..").|r") end
+                return
+            end
+            local bname = botNames[orphanIdx]
+            SendChatMessage(".playerbots bot remove "..bname, "SAY")
+            orphanIdx = orphanIdx + 1
+        end)
+    end)
     local disbandBtn = CreateFrame("Button", "LichborneDisbandBtn", f)
     disbandBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 15, 10)
     disbandBtn:SetSize(155, 28)
@@ -4556,11 +4799,11 @@ local function OnFirstShow()
     disbandBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight", "ADD")
     local disbandLbl = disbandBtn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     disbandLbl:SetAllPoints(disbandBtn); disbandLbl:SetJustifyH("CENTER"); disbandLbl:SetJustifyV("MIDDLE")
-    disbandLbl:SetText("|cffd4af37Disband Group / Raid|r")
+    disbandLbl:SetText("|cffd4af37Disband Group|r")
     disbandBtn:SetScript("OnEnter", function()
         GameTooltip:SetOwner(disbandBtn, "ANCHOR_TOP")
-        GameTooltip:AddLine("Disband Group / Raid", 1, 1, 1)
-        GameTooltip:AddLine("Kicks all members and disbands.", 0.8, 0.8, 0.8)
+        GameTooltip:AddLine("Disband Group", 1, 1, 1)
+        GameTooltip:AddLine("Removes all bots and leaves the group.", 0.8, 0.8, 0.8)
         GameTooltip:Show()
     end)
     disbandBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -4577,10 +4820,10 @@ local function OnFirstShow()
 
     local disbText = disbConfirm:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     disbText:SetPoint("TOP", disbConfirm, "TOP", 0, -12)
-    disbText:SetText("|cffd4af37Disband Group / Raid?|r")
+    disbText:SetText("|cffd4af37Disband Group?|r")
     local disbSub = disbConfirm:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     disbSub:SetPoint("TOP", disbText, "BOTTOM", 0, -4)
-    disbSub:SetText("|cffaaaaaaKicks all members and leaves the group.|r")
+    disbSub:SetText("|cffaaaaaaRemoves all bots and leaves the group.|r")
 
     local disbYes = CreateFrame("Button", nil, disbConfirm)
     disbYes:SetSize(100, 22); disbYes:SetPoint("BOTTOMLEFT", disbConfirm, "BOTTOMLEFT", 12, 10)
@@ -4616,55 +4859,18 @@ local function OnFirstShow()
             end
         end
         lockExtra(true)
-        local playerName = UnitName("player")
-        local members = {}
-        if GetNumRaidMembers() > 0 then
-            for i = 1, GetNumRaidMembers() do
-                local unit = "raid"..i
-                if UnitExists(unit) then
-                    local name = UnitName(unit)
-                    if name and name ~= playerName then members[#members+1] = name end
-                end
-            end
-        elseif GetNumPartyMembers() > 0 then
-            for i = 1, GetNumPartyMembers() do
-                local unit = "party"..i
-                if UnitExists(unit) then
-                    local name = UnitName(unit)
-                    if name and name ~= playerName then members[#members+1] = name end
-                end
-            end
-        end
-        if #members == 0 then
+        DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cffd4af37Disbanding group...|r", 1, 0.85, 0)
+        SendChatMessage(".playerbots bot remove *", "SAY")
+        local waited = 0
+        local disbFrame = CreateFrame("Frame")
+        disbFrame:SetScript("OnUpdate", function(_, elapsed)
+            waited = waited + elapsed
+            if waited < 1.0 then return end
             LeaveParty()
             SetButtonsLocked(false)
             lockExtra(false)
             DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cffd4af37Group disbanded.|r", 1, 0.85, 0)
-            return
-        end
-        DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cffd4af37Disbanding - kicking " .. #members .. " members...|r", 1, 0.85, 0)
-        local idx = 1
-        local waited = 0
-        local phase = "kick"
-        local disbFrame = CreateFrame("Frame")
-        disbFrame:SetScript("OnUpdate", function(_, elapsed)
-            waited = waited + elapsed
-            if phase == "kick" then
-                if waited < 0.2 then return end
-                waited = 0
-                if idx > #members then phase = "leave"; waited = 0; return end
-                local name = members[idx]
-                SendChatMessage(".playerbots bot remove " .. name, "SAY")
-                UninviteUnit(name)
-                idx = idx + 1
-            elseif phase == "leave" then
-                if waited < 1.0 then return end
-                LeaveParty()
-                SetButtonsLocked(false)
-                lockExtra(false)
-                DEFAULT_CHAT_FRAME:AddMessage("|cffC69B3ALichborne:|r |cffd4af37All members kicked. Group disbanded.|r", 1, 0.85, 0)
-                disbFrame:SetScript("OnUpdate", nil)
-            end
+            disbFrame:SetScript("OnUpdate", nil)
         end)
     end)
 
@@ -4673,9 +4879,9 @@ local function OnFirstShow()
         disbConfirm:Show()
     end)
 
-    -- ── Version / Info box (right of Stop Invite) ─────────────
+    -- ── Version / Info box (right of Invite Raid) ────────────
     local infoBox = CreateFrame("Frame", nil, f)
-    infoBox:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 895, 10)
+    infoBox:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 710, 10)
     infoBox:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -17, 10)
     infoBox:SetHeight(130)
     infoBox:SetFrameLevel(fl + 11)
@@ -4684,16 +4890,18 @@ local function OnFirstShow()
     infoBox:SetBackdropBorderColor(0.78, 0.61, 0.23, 0.9)
     local infoText = infoBox:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     infoText:SetPoint("CENTER", infoBox, "CENTER", 0, 0)
-    infoText:SetWidth(190)
+    infoText:SetWidth(380)
     infoText:SetJustifyH("CENTER"); infoText:SetJustifyV("MIDDLE")
     infoText:SetText(
-        "|cffd4af37LICHBORNE|r\n" ..
-        "|cffd4af37Gear Tracker & Raid Planner|r\n" ..
-        "|cffd4af37v1.76|r\n" ..
+        "|cffd4af37LICHBORNE  —  Gear Tracker & Raid Planner  —  v1.77|r\n" ..
         "\n" ..
-        "|cffaaaaaaQuestions & Support:|r\n" ..
-        "|cffd4af37lichborne.wow|r\n" ..
-        "|cffd4af37@proton.me|r"
+        "|cffaaaaaaBuilt for WotLK 3.3.5a  ·  AzerothCore + PlayerBots|r\n" ..
+        "\n" ..
+        "|cffaaaaaaQuestions & Support:|r  |cffd4af37lichborne.wow@proton.me|r\n" ..
+        "|cffaaaaaaFeedback & Bug Reports:|r  |cffd4af37Discord:|r |cff7289DAjared2219|r\n" ..
+        "\n" ..
+        "|cffaaaaaaPlease report any bugs or share feature ideas!|r\n" ..
+        "|cffaaaaaaYour feedback helps keep this addon alive.|r"
     )
 
 end
@@ -4780,7 +4988,7 @@ local function BuildFrameBG()
     title:SetPoint("TOPLEFT", f, "TOPLEFT", 10, -12)
     title:SetPoint("TOPRIGHT", f, "TOPRIGHT", -280, -12)
     title:SetJustifyH("LEFT")
-    title:SetText("|cffC69B3ALICHBORNE|r  —  Gear Tracker  |cffaaaaaa v1.76|r")
+    title:SetText("|cffC69B3ALICHBORNE|r  —  Gear Tracker  |cffaaaaaa v1.77|r")
     local closeBtn = CreateFrame("Button", "LichborneCloseBtn", f, "UIPanelCloseButton")
     closeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", 2, 2)
     closeBtn:SetScript("OnClick", function() f:Hide() end)
@@ -5163,6 +5371,8 @@ LichborneInspectRow = nil
 LichborneInspectUnit = "target"  -- unit token for current inspect
 local LichborneInspectRetries = 0  -- retry counter for empty gear data
 local INSPECT_MAX_RETRIES = 3      -- max silent retries before giving up
+local LichborneCacheRetries = 0    -- retry counter for uncached item data
+local CACHE_MAX_RETRIES = 5        -- max cache retries before accepting partial data
 -- inspectWait declared at module top (shared with button callbacks in OnFirstShow)
 
 local function CalcGS()
@@ -5227,11 +5437,19 @@ local function CalcGS()
 
     -- If any slot came back uncached, wait and retry to fill in the missing data.
     if anyPending then
-        if LichborneAddStatus then
-            LichborneAddStatus:SetText("|cffff9900Item data not cached yet, retrying...|r")
+        LichborneCacheRetries = LichborneCacheRetries + 1
+        if LichborneCacheRetries <= CACHE_MAX_RETRIES then
+            if LichborneAddStatus then
+                LichborneAddStatus:SetText("|cffff9900Item data not cached yet, retrying ("..LichborneCacheRetries.."/"..CACHE_MAX_RETRIES..")...|r")
+            end
+            inspectWait = 0  -- reset so OnUpdate waits another full interval before next attempt
+            return
         end
-        inspectWait = 0  -- reset so OnUpdate waits another full interval before next attempt
-        return
+        -- Exhausted cache retries — proceed with whatever data we have
+        if LichborneAddStatus then
+            LichborneAddStatus:SetText("|cffff9900Some items not cached — using available data.|r")
+        end
+        LichborneCacheRetries = 0
     end
 
     for _, row in ipairs(rowFrames) do
@@ -5341,6 +5559,7 @@ local function CalcGS()
     end
 
     LichborneInspectRetries = 0  -- reset for next inspect
+    LichborneCacheRetries = 0     -- reset cache retry counter
     ClearInspectPlayer()
     LichborneInspectTarget = nil
     LichborneInspectRow = nil

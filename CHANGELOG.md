@@ -1,78 +1,43 @@
-# Changelog
+# LICHBORNE GEAR TRACKER — CHANGELOG
 
-All notable changes to LichborneTracker are documented in this file.
-
----
-
-## v1.76 - 2026-03-29
-
-### Fixed
-
-- Converted `activeTab`, four UI state variables (`LichborneAllCountLabels`, `LichborneRosterIlvlLabel`, `LichborneRosterGsLabel`, `LichborneRaidCountLabels`), and three functions (`RefreshRaidRows`, `RefreshAllRows`, `UpdateSummary`) from accidental globals to proper `local` declarations, eliminating addon conflict risk.
-- Converted `RH2` helper inside `BuildRaidFrame` to `local` — it was a bare global with a short generic name.
-- Fixed Tier 0 dropdown color rendering — `TIER_COLORS[0]` was `nil`; now correctly maps T0 to key `18` (silver-blue).
-- Fixed GS scan timer never resetting — `inspectWait` was declared after the functions that reference it, causing the reset writes to target a different variable. Moved to module top so all closures share the same variable.
-- Replaced three identical inline `classMap` tables with a single module-level `CLASS_TOKEN_MAP` constant.
+All entries: newest first.
 
 ---
 
-## v1.75 - 2026-03-28
+## v1.77 — 2026-03-29
 
-### Fixed
+- **Discord feedback added** — Info box now shows Discord username (jared2219) under a "Feedback & Bug Reports" section, making it easier for users to report issues or share feedback
+- **Logout Orphaned Bots — full button lockout** — All buttons (including Invite Raid, Invite Group, and Stop) are now disabled while orphaned bots are being logged out; previously the Invite Raid button remained clickable
+- **+Add Target GS / +Add Target Spec — button lockout** — Clicking either button now disables all other buttons (including Stop, Invite Raid, and Invite Group) until the scan finishes, preventing conflicting operations
+- **+Add Target GS / +Add Target Spec — guaranteed unlock** — Rewrote both buttons to use the same self-contained loop pattern as the group scan buttons. The loop that locks buttons also owns the unlock, so buttons always re-enable when the scan completes, fails, or hits the 15-second safety timeout
+- **+Add Target GS — fixed permanent lock** — If item data fails to cache (common with bot characters), the scan now gives up after 5 retries (~7.5s) and uses whatever data is available instead of locking buttons forever
+- **Version labels** — TOC, title bar, and info box aligned to `1.77`
 
-- Fixed minimap icon not appearing on machines where bundled libs failed to load silently.
-- Added native fallback minimap button (based on DBM implementation) that activates automatically when LibDBIcon is unavailable.
-- Replaced bundled libs with DBM-compatible versions for wider client support.
-- Moved lib registration into `ADDON_LOADED` for correct initialization order.
-- Changed minimap icon to book texture (`INV_Misc_Book_11`).
-
----
-
-## v1.74 - 2026-03-27
-
-### Fixed
-
-- Fixed minimap icon not appearing on fresh installs without other broker addons.
-- Replaced bundled libs with compatible versions for wider client compatibility.
-- Moved lib registration into `ADDON_LOADED` for reliability.
-- Changed minimap icon to book texture (`INV_Misc_Book_11`).
+> **Development note:** This release consolidates internal builds 1.77.1 through 1.77.8.
+> Those iterations were all pre-release debugging work on the button lockout system
+> and are not separately numbered public versions.
 
 ---
 
-## v1.72 - 2026-03-26
+## v1.76 — prior session
 
-### Fixed
-
-- Fixed nil value crash (`attempt to index local 'c'`) when opening the raid selector dropdown with an unmapped tier value — now falls back to T1 color safely.
-- Fixed dropdown menus (tier, raid, group, page, spec, sort) orphaning on screen when the addon is closed via ESC key — all menus now close via an `OnHide` hook on the main frame.
+- **Global variable audit** — Converted `activeTab`, four UI state vars, `RefreshRaidRows`, `RefreshAllRows`, `UpdateSummary`, and `RH2` from accidental globals to proper `local` declarations, eliminating addon conflict risk
+- **Tier 0 color fix** — Tier 0 dropdown now correctly displays its silver-blue color instead of rendering white (key `18` lookup was previously resolving to `nil`)
+- **Inspect timer bug fix** — `inspectWait` moved to module top so the GS scan timer resets correctly; previously the reset wrote to a different variable and the timer never actually cleared
+- **Deduplicated `classMap`** — Three identical inline `classMap` tables replaced with a single module-level `CLASS_TOKEN_MAP` constant
 
 ---
 
-## v1.71 - 2026-03-26
+## v1.75 — prior session
 
-### Added
+- **Minimap icon fix (improved)** — Fixed display issue on machines where bundled libs failed to load silently
+- **Native fallback minimap button** — Activates automatically when LibDBIcon is unavailable (based on DBM implementation)
+- **Updated libs** — Replaced bundled libs with DBM-compatible versions for wider client support
+- **Load order fix** — Moved lib registration into ADDON_LOADED for correct initialization
+- **Minimap icon updated** — Changed to book texture (INV_Misc_Book_11) for a cleaner look
 
-- Added a separate `GS` column for actual GearScore alongside the existing `iLvl` column.
-- Added automatic WotLK-style GearScore calculation from inspected equipment, including slot weighting, rarity scaling, and weapon handling.
+---
 
-### Changed
+## v1.74 and earlier
 
-- Renamed the former `GS` display to `iLvl` everywhere it represents average equipped item level.
-- Updated Class, Raid, and All tabs to show both `iLvl` and `GS` values.
-- Updated sorting so Gear Score sorts now use the true `GS` value instead of average item level.
-- Preserved real GearScore values across All tab groups, raid rosters, copy/paste, drag-reorder, and reset paths.
-- Split shared addon code out of `LichborneTracker.lua` into dedicated modules for core state, layout constants, static data, GearScore helpers, needs handling, shared UI helpers, and raid row refresh logic.
-
-### Fixed
-
-- Fixed Add Group scan actions on 3.3.5a so UI handlers bind the local scan-state helper instead of calling a missing global `SetScanActive` when addon hook stacks are present.
-- Fixed inspect slot mapping so equipped item levels are read from the correct gear slots.
-- Fixed All tab actions so add, delete, and sync operations act on the displayed character.
-- Fixed tracker deletion cleanup so removing a character also clears roster and needs references.
-- Fixed raid dropdown closure scoping.
-- Fixed raid size normalization and roster initialization for all raid views.
-- Fixed invite button visibility so Invite Raid, Invite Group, and Stop Invite match the active state.
-- Fixed raid row drag/drop so reordering no longer drops stored GearScore values.
-- Fixed inspect refresh so empty slots clear stale item-level values instead of leaving old data behind.
-- Fixed addon startup compatibility by loading `CallbackHandler-1.0` before `LibDataBroker-1.1`.
-- Fixed multiple UI script handlers to use explicit event arguments instead of fragile implicit globals such as `this` and `arg1`.
+See repository commit history.

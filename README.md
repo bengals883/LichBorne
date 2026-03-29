@@ -2,7 +2,7 @@
 
 **A World of Warcraft WotLK 3.3.5a Addon for AzerothCore Private Servers that tracks gear score, iLvL, gear slots, specs, and raid composition for your entire playerbot roster.**
 
-**Version 1.76**
+**Version 1.77**
 
 ---
 
@@ -11,6 +11,15 @@
 ![Class Tracker](Screenshots/ClassTab.png)
 ![Raid Planner](Screenshots/RaidTab.png)
 ![Character Sheet](Screenshots/CharacterSheet.png)
+
+---
+
+## Recent Changes (v1.77)
+
+- **Discord feedback added** — Info box now shows Discord username (jared2219) under a "Feedback & Bug Reports" section, making it easier for users to report issues or share feedback
+- **Logout Orphaned Bots — new button** — Adds a dedicated button that logs out any bots currently in your roster who are not in your active raid group. This prevents ghost bots from holding online slots and interfering with fresh invite sequences. All tracker buttons are disabled while the logout runs to prevent conflicts
+- **+Add Target GS / +Add Target Spec — locked during scan** — Both buttons now disable all other controls while a single-target scan is running, preventing conflicting operations until the scan completes
+- **Version labels** — TOC, title bar, and info box aligned to `1.77`
 
 ---
 
@@ -88,7 +97,7 @@ Per-character gear slot wishlist, accessible from all tabs.
 
 ## Raid Tab
 
-Up to 40 slots across two columns. Each slot shows class icon, spec icon, name, iLvl, GS, needs, role, notes, and delete button.
+Up to 40 slots across two columns. Each slot shows class icon, spec icon, name, iLvL, GS, needs, role, notes, and delete button.
 
 ### Raid Controls
 
@@ -236,7 +245,7 @@ Built for the Lichborne AzerothCore private server.
 
 Special thanks to: **Dohtt**, **Scarecr0w12** — TheCGN.net, **Dreathean**, **Revision**, **crow**, and **ScoobyPwnsOnU** for feature suggestions, testing, and support.
 
-**Questions & Support:** lichborne.wow@proton.me
+**Questions & Support:** lichborne.wow@proton.me | Discord: jared2219
 
 ---
 
